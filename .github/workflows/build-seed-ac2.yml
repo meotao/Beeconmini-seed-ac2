@@ -80,9 +80,58 @@ jobs:
           ./scripts/feeds install -a
 
       # ──────────────────────────────────────────────────────────────
-      # 6. 集成 OpenAppFilter（OAF 应用过滤）
+      # 6. 修补 Rust 工具链：禁用 download-ci-llvm
+      #
+      #    【问题根因 - 已通过社区研究确认】
+      #    feeds/packages/lang/rust/Makefile 中有：
+      #      --set=llvm.download-ci-llvm=true
+      #    这使得编译时尝试从 ci-artifacts.rust-lang.org 下载
+      #    Rust 1.85.0 对应 commit 的预编译 LLVM，但该 URL 已 404
+      #    （Rust CI 只保留最近期构建产物，旧版本会定期清理）。
+      #
+      #    【官方认可的解决方案】
+      #    来源：OpenWrt 官方 commit b49fb106、OpenWrt Forum、
+      #    openwrt/packages issue #27331
+      #    方法：将 Makefile 中 download-ci-llvm=true 改为 false，
+      #    让 LLVM 从源码本地编译（会多花 ~20 分钟，但可靠）。
+      #
+      #    【附加修补：openclash 的 shadowsocks-rust 依赖】
+      #    luci-app-openclash 通过 Kconfig "select" 强制拉入
+      #    shadowsocks-rust，而 Kconfig select 无法被用户 config
+      #    行（=n / is not set）覆盖。删除该依赖行后 OpenClash
+      #    功能不受影响（Clash 内核是 Go 编写，不依赖 Rust）。
+      # ──────────────────────────────────────────────────────────────
+      - name: Patch feeds - fix Rust LLVM and OpenClash dependency
+        run: |
+          # ── 补丁 A：rust Makefile 禁用 download-ci-llvm ──────────
+          RUST_MK="$WORKSPACE/openwrt/feeds/packages/lang/rust/Makefile"
+          if [ -f "$RUST_MK" ]; then
+            echo "=== rust Makefile patch 前 ==="
+            grep "download-ci-llvm" "$RUST_MK" || echo "（未找到该行）"
+            # 将 download-ci-llvm=true 替换为 false
+            sed -i 's/download-ci-llvm=true/download-ci-llvm=false/g' "$RUST_MK"
+            echo "=== rust Makefile patch 后 ==="
+            grep "download-ci-llvm" "$RUST_MK"
+          else
+            echo "WARNING: rust Makefile 未找到：$RUST_MK"
+          fi
+
+          # ── 补丁 B：openclash Makefile 移除 shadowsocks-rust 依赖 ─
+          OPENCLASH_MK="$WORKSPACE/openwrt/feeds/luci/applications/luci-app-openclash/Makefile"
+          if [ -f "$OPENCLASH_MK" ]; then
+            echo "=== openclash shadowsocks-rust 行（patch 前）==="
+            grep -n "shadowsocks.rust" "$OPENCLASH_MK" || echo "（未找到，可能已不存在）"
+            sed -i '/shadowsocks.rust/Id' "$OPENCLASH_MK"
+            echo "=== patch 后残余 shadowsocks 行 ==="
+            grep -n "shadowsocks" "$OPENCLASH_MK" || echo "（干净）"
+          else
+            echo "WARNING: openclash Makefile 未找到：$OPENCLASH_MK"
+          fi
+
+      # ──────────────────────────────────────────────────────────────
+      # 7. 集成 OpenAppFilter（OAF 应用过滤）
       #    官方推荐方式：clone 到 package/ 目录，无需 feeds
-      #    仅需 CONFIG_PACKAGE_luci-app-oaf=y，make defconfig 自动拉入：
+      #    启用 CONFIG_PACKAGE_luci-app-oaf=y，make defconfig 自动拉入：
       #      kmod-oaf（内核模块）/ oaf（服务守护进程）/ luci-app-oaf（LuCI 页面）
       # ──────────────────────────────────────────────────────────────
       - name: Integrate OpenAppFilter (OAF)
@@ -90,36 +139,6 @@ jobs:
           git clone --depth=1 \
             https://github.com/destan19/OpenAppFilter.git \
             $WORKSPACE/openwrt/package/OpenAppFilter
-
-      # ──────────────────────────────────────────────────────────────
-      # 7. 修补 luci-app-openclash：移除 shadowsocks-rust 强制依赖
-      #
-      #    根本原因：luci-app-openclash 的 Makefile 中通过 Kconfig
-      #    "select" 语义强制拉入 shadowsocks-rust，进而触发 Rust
-      #    工具链编译。Rust 1.85.0 构建时需从 ci-artifacts.rust-lang.org
-      #    下载特定 commit 的预编译 LLVM，但该 URL 已 404（Rust CI 只
-      #    保留最近期构建产物）。
-      #
-      #    Kconfig "select" 无法被任何用户 config 行（=n / is not set）
-      #    覆盖，唯一解法是直接从 Makefile 里删除该依赖声明。
-      #    OpenClash 本体（clash 内核）不依赖 shadowsocks-rust 运行，
-      #    删除后功能不受影响。
-      # ──────────────────────────────────────────────────────────────
-      - name: Patch openclash - remove shadowsocks-rust dependency
-        run: |
-          OPENCLASH_MK="$WORKSPACE/openwrt/feeds/luci/applications/luci-app-openclash/Makefile"
-          if [ -f "$OPENCLASH_MK" ]; then
-            echo "=== shadowsocks-rust 相关行（patch 前）==="
-            grep -n "shadowsocks.rust" "$OPENCLASH_MK" || echo "（未找到，可能已不存在）"
-            # 删除所有含 shadowsocks-rust 的行
-            sed -i '/shadowsocks.rust/Id' "$OPENCLASH_MK"
-            echo "=== patch 后残余 shadowsocks 行 ==="
-            grep -n "shadowsocks" "$OPENCLASH_MK" || echo "（干净）"
-          else
-            echo "WARNING: openclash Makefile 未找到，搜索实际路径..."
-            find $WORKSPACE/openwrt/feeds -name "Makefile" -path "*openclash*" | head -5
-            echo "跳过 patch（openclash 可能未安装）"
-          fi
 
       # ──────────────────────────────────────────────────────────────
       # 8. 合并配置 & make defconfig
@@ -142,6 +161,9 @@ jobs:
             $GITHUB_WORKSPACE/source/configs/seed-ac2.config \
             > .config
           make defconfig
+          # 诊断：确认 rust 编译选项状态
+          echo "=== .config 中 rust / shadowsocks-rust 相关行 ==="
+          grep -i "CONFIG.*rust" .config || echo "（rust 相关包未被选中）"
 
       # ──────────────────────────────────────────────────────────────
       # 9. 下载所有源码包（并行 + 失败重试）
