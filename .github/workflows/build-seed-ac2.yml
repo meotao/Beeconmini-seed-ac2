@@ -87,7 +87,9 @@ jobs:
       # ──────────────────────────────────────────────────────────────
       - name: Integrate OpenAppFilter (OAF)
         run: |
-          git clone --depth=1             https://github.com/destan19/OpenAppFilter.git             $WORKSPACE/openwrt/package/OpenAppFilter
+          git clone --depth=1 \
+            https://github.com/destan19/OpenAppFilter.git \
+            $WORKSPACE/openwrt/package/OpenAppFilter
 
       # ──────────────────────────────────────────────────────────────
       # 7. 合并配置 & make defconfig
@@ -192,7 +194,7 @@ jobs:
             **固件包含功能**
             - PoE 管理（RTL8238B，8 口 PoE+）
             - OpenClash（透明代理）
-            - AppFilter（应用过滤）
+            - OAF 应用过滤（OpenAppFilter，支持抖音/王者荣耀等数百款 App）
             - NLBW（实时带宽监控）
             - VLMCSD（KMS 激活服务器）
             - ttyd（Web 终端）
