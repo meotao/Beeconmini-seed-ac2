@@ -1,0 +1,213 @@
+name: Build BeeconMini SEED AC2
+
+# 仅手动触发
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      # ──────────────────────────────────────────────────────────────
+      # 0. 把构建目录挂到 runner 的 150 GB 临时盘（/mnt）
+      #    避免系统盘（约 14 GB）编译中途爆满
+      # ──────────────────────────────────────────────────────────────
+      - name: Mount build workspace to /mnt
+        run: |
+          sudo mkdir -p /mnt/openwrt
+          sudo chown runner:runner /mnt/openwrt
+          echo "WORKSPACE=/mnt/openwrt" >> $GITHUB_ENV
+
+      # ──────────────────────────────────────────────────────────────
+      # 1. 检出本仓库（包含 configs/ 目录）
+      # ──────────────────────────────────────────────────────────────
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      # ──────────────────────────────────────────────────────────────
+      # 2. 释放 runner 自带的无用磁盘空间（~5 GB）
+      # ──────────────────────────────────────────────────────────────
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /usr/local/lib/android \
+            || true
+
+      # ──────────────────────────────────────────────────────────────
+      # 3. 安装编译依赖
+      # ──────────────────────────────────────────────────────────────
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            build-essential ccache clang cmake cpio curl file flex gawk \
+            gettext git gperf libncurses5-dev libssl-dev python3 rsync \
+            unzip wget zlib1g-dev zstd lib32gcc-s1 libc6-dev-i386 \
+            subversion patch
+
+      # ──────────────────────────────────────────────────────────────
+      # 4. 克隆 BeeconMini ImmortalWrt（branch 24.10.1）
+      # ──────────────────────────────────────────────────────────────
+      - name: Clone ImmortalWrt source
+        run: |
+          git clone --depth=1 -b 24.10.1 \
+            https://github.com/BeeconMini/immortalwrt.git \
+            $WORKSPACE/openwrt
+
+      # ──────────────────────────────────────────────────────────────
+      # 5. 更新 feeds
+      #    标准 feeds（packages / luci / routing / telephony）来自
+      #    仓库内的 feeds.conf.default，固定 commit 保证可复现。
+      #    额外追加 iStore feed 以获取 luci-app-store / luci-app-quickstart
+      # ──────────────────────────────────────────────────────────────
+      - name: Update & install feeds
+        run: |
+          cd $WORKSPACE/openwrt
+          # 追加 iStore feed（提供应用商店 & 快速配置向导）
+          echo "src-git istore https://github.com/linkease/istore.git;main" \
+            >> feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # ──────────────────────────────────────────────────────────────
+      # 6. 集成 OpenAppFilter（OAF 应用过滤）
+      #    官方推荐方式：clone 到 package/ 目录，无需 feeds
+      #    仅需 CONFIG_PACKAGE_luci-app-oaf=y，make defconfig 自动拉入：
+      #      kmod-oaf（内核模块）/ oaf（服务守护进程）/ luci-app-oaf（LuCI 页面）
+      # ──────────────────────────────────────────────────────────────
+      - name: Integrate OpenAppFilter (OAF)
+        run: |
+          git clone --depth=1             https://github.com/destan19/OpenAppFilter.git             $WORKSPACE/openwrt/package/OpenAppFilter
+
+      # ──────────────────────────────────────────────────────────────
+      # 7. 合并配置 & make defconfig
+      #
+      #    两层 cat 合并：
+      #      ① mt7981-common.config — MT7981B 平台通用（无 Wi-Fi）
+      #      ② seed-ac2.config      — SEED AC2 专属差异
+      #         · subtarget=filogic（非 mt7981，已从源码确认）
+      #         · kmod-switch-rtl8373 + kmod-i2c-gpio（RTL8373 交换芯片）
+      #         · PoE / OAF / OpenClash / NLBW / VLMCSD 等应用包
+      #
+      #    make defconfig 补全其余默认值，并自动拉入 DEVICE_PACKAGES 中
+      #    声明的 kmod-switch-rtl8373 / kmod-fs-f2fs / kmod-fs-ext4 等
+      # ──────────────────────────────────────────────────────────────
+      - name: Merge config & run defconfig
+        run: |
+          cd $WORKSPACE/openwrt
+          cat \
+            $GITHUB_WORKSPACE/source/configs/mt7981-common.config \
+            $GITHUB_WORKSPACE/source/configs/seed-ac2.config \
+            > .config
+          make defconfig
+
+      # ──────────────────────────────────────────────────────────────
+      # 7. 下载所有源码包（并行 + 失败重试）
+      # ──────────────────────────────────────────────────────────────
+      - name: Download package sources
+        run: |
+          cd $WORKSPACE/openwrt
+          make download -j$(nproc)
+          # 补救：重试一次避免偶发网络超时导致失败
+          make download -j$(nproc) || true
+
+      # ──────────────────────────────────────────────────────────────
+      # 8. 编译固件
+      #    先并行编译；失败后以单线程 + 详细日志重试便于排查
+      # ──────────────────────────────────────────────────────────────
+      - name: Compile firmware
+        run: |
+          cd $WORKSPACE/openwrt
+          make -j$(nproc) || make -j1 V=s
+
+      # ──────────────────────────────────────────────────────────────
+      # 9. 收集固件产物
+      # ──────────────────────────────────────────────────────────────
+      - name: Collect firmware artifacts
+        run: |
+          mkdir -p /tmp/artifacts
+          find $WORKSPACE/openwrt/bin/targets -type f \
+            \( -name "*sysupgrade*.bin" \
+               -o -name "*factory*.bin" \
+               -o -name "*.manifest" \) \
+            -exec cp {} /tmp/artifacts/ \;
+          echo "=== Collected files ==="
+          ls -lh /tmp/artifacts/
+
+      # ──────────────────────────────────────────────────────────────
+      # 10. 上传 GitHub Artifact（便于直接下载，30 天保留）
+      # ──────────────────────────────────────────────────────────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: beeconmini-seed-ac2-${{ github.run_number }}
+          path: /tmp/artifacts/
+          retention-days: 30
+
+      # ──────────────────────────────────────────────────────────────
+      # 11. 生成 Release Tag（格式：yyyymmdd + run_number）
+      # ──────────────────────────────────────────────────────────────
+      - name: Generate release tag
+        id: tag
+        run: |
+          echo "TAG=$(date +%Y%m%d)${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+      # ──────────────────────────────────────────────────────────────
+      # 12. 发布 GitHub Release
+      # ──────────────────────────────────────────────────────────────
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: ${{ steps.tag.outputs.TAG }}
+          name: "BeeconMini SEED AC2 | ${{ steps.tag.outputs.TAG }}"
+          body: |
+            ## BeeconMini SEED AC2 自动构建固件
+
+            **构建信息**
+            - Commit: ${{ github.sha }}
+            - Branch: 24.10.1
+            - 上游: BeeconMini/immortalwrt
+
+            **硬件规格**
+            | 项目 | 参数 |
+            |------|------|
+            | CPU | MT7981B (Filogic 820) |
+            | 交换芯片 | RTL8373（8×2.5G PoE+） |
+            | WAN PHY | RTL8221B（2.5G） |
+            | 存储 | 1G RAM + 64G eMMC |
+            | Wi-Fi | 无 |
+            | PoE 单口最大功率 | 30W |
+
+            **固件包含功能**
+            - PoE 管理（RTL8238B，8 口 PoE+）
+            - OpenClash（透明代理）
+            - AppFilter（应用过滤）
+            - NLBW（实时带宽监控）
+            - VLMCSD（KMS 激活服务器）
+            - ttyd（Web 终端）
+            - iStore 应用商店 + QuickStart 快速配置
+            - 定时重启
+            - TurboACC MTK HW NAT 硬件加速
+            - eQoS 带宽控制 / UPnP
+
+            **刷机说明**
+            - `*sysupgrade*` — 从 OpenWrt/ImmortalWrt 在线升级
+            - `*factory*` — 从原厂固件首次刷入
+          files: |
+            ${{ env.WORKSPACE }}/openwrt/bin/targets/*/*/*.bin
+            ${{ env.WORKSPACE }}/openwrt/bin/targets/*/*/*.manifest
+          make_latest: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
