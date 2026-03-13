@@ -92,7 +92,37 @@ jobs:
             $WORKSPACE/openwrt/package/OpenAppFilter
 
       # ──────────────────────────────────────────────────────────────
-      # 7. 合并配置 & make defconfig
+      # 7. 修补 luci-app-openclash：移除 shadowsocks-rust 强制依赖
+      #
+      #    根本原因：luci-app-openclash 的 Makefile 中通过 Kconfig
+      #    "select" 语义强制拉入 shadowsocks-rust，进而触发 Rust
+      #    工具链编译。Rust 1.85.0 构建时需从 ci-artifacts.rust-lang.org
+      #    下载特定 commit 的预编译 LLVM，但该 URL 已 404（Rust CI 只
+      #    保留最近期构建产物）。
+      #
+      #    Kconfig "select" 无法被任何用户 config 行（=n / is not set）
+      #    覆盖，唯一解法是直接从 Makefile 里删除该依赖声明。
+      #    OpenClash 本体（clash 内核）不依赖 shadowsocks-rust 运行，
+      #    删除后功能不受影响。
+      # ──────────────────────────────────────────────────────────────
+      - name: Patch openclash - remove shadowsocks-rust dependency
+        run: |
+          OPENCLASH_MK="$WORKSPACE/openwrt/feeds/luci/applications/luci-app-openclash/Makefile"
+          if [ -f "$OPENCLASH_MK" ]; then
+            echo "=== shadowsocks-rust 相关行（patch 前）==="
+            grep -n "shadowsocks.rust" "$OPENCLASH_MK" || echo "（未找到，可能已不存在）"
+            # 删除所有含 shadowsocks-rust 的行
+            sed -i '/shadowsocks.rust/Id' "$OPENCLASH_MK"
+            echo "=== patch 后残余 shadowsocks 行 ==="
+            grep -n "shadowsocks" "$OPENCLASH_MK" || echo "（干净）"
+          else
+            echo "WARNING: openclash Makefile 未找到，搜索实际路径..."
+            find $WORKSPACE/openwrt/feeds -name "Makefile" -path "*openclash*" | head -5
+            echo "跳过 patch（openclash 可能未安装）"
+          fi
+
+      # ──────────────────────────────────────────────────────────────
+      # 8. 合并配置 & make defconfig
       #
       #    两层 cat 合并：
       #      ① mt7981-common.config — MT7981B 平台通用（无 Wi-Fi）
@@ -114,7 +144,7 @@ jobs:
           make defconfig
 
       # ──────────────────────────────────────────────────────────────
-      # 7. 下载所有源码包（并行 + 失败重试）
+      # 9. 下载所有源码包（并行 + 失败重试）
       # ──────────────────────────────────────────────────────────────
       - name: Download package sources
         run: |
@@ -124,8 +154,8 @@ jobs:
           make download -j$(nproc) || true
 
       # ──────────────────────────────────────────────────────────────
-      # 8. 编译固件
-      #    先并行编译；失败后以单线程 + 详细日志重试便于排查
+      # 10. 编译固件
+      #     先并行编译；失败后以单线程 + 详细日志重试便于排查
       # ──────────────────────────────────────────────────────────────
       - name: Compile firmware
         run: |
@@ -133,7 +163,7 @@ jobs:
           make -j$(nproc) || make -j1 V=s
 
       # ──────────────────────────────────────────────────────────────
-      # 9. 收集固件产物
+      # 11. 收集固件产物
       # ──────────────────────────────────────────────────────────────
       - name: Collect firmware artifacts
         run: |
@@ -147,7 +177,7 @@ jobs:
           ls -lh /tmp/artifacts/
 
       # ──────────────────────────────────────────────────────────────
-      # 10. 上传 GitHub Artifact（便于直接下载，30 天保留）
+      # 12. 上传 GitHub Artifact（便于直接下载，30 天保留）
       # ──────────────────────────────────────────────────────────────
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -157,7 +187,7 @@ jobs:
           retention-days: 30
 
       # ──────────────────────────────────────────────────────────────
-      # 11. 生成 Release Tag（格式：yyyymmdd + run_number）
+      # 13. 生成 Release Tag（格式：yyyymmdd + run_number）
       # ──────────────────────────────────────────────────────────────
       - name: Generate release tag
         id: tag
@@ -165,7 +195,7 @@ jobs:
           echo "TAG=$(date +%Y%m%d)${{ github.run_number }}" >> $GITHUB_OUTPUT
 
       # ──────────────────────────────────────────────────────────────
-      # 12. 发布 GitHub Release
+      # 14. 发布 GitHub Release
       # ──────────────────────────────────────────────────────────────
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
