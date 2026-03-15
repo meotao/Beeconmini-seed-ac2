@@ -51,14 +51,13 @@ jobs:
       # ──────────────────────────────────────────────────────────────
       # 3. 安装编译依赖
       #
-      #    在原有基础上新增（均经 immortalwrt prereq-build.mk 验证必需）：
+      #    Ubuntu 22.04 (runner) 特殊处理：
+      #      perl-modules-5.34  — 确保 Perl 5.34 模块集完整
+      #      python3-distutils  — Ubuntu 22.04 Python 3.10 不自带，
+      #                           prereq-build.mk 明确检测此工具
+      #      python3-setuptools — 部分 Python host 工具依赖
       #      bison              — 内核编译必需（parser generator）
       #      libelf-dev         — 内核模块编译必需（提供 libelf.h）
-      #      python3-distutils  — prereq-build.mk 中 TestHostCommand 明确检测，
-      #                           Python 3.10（Ubuntu 22.04 默认）不自带
-      #      python3-setuptools — 部分 Python host 工具依赖
-      #      perl-modules-5.34  — 确保 Perl 模块集完整，防止 libxcrypt 在
-      #                           Perl 5.34 上因缺少模块而构建失败
       # ──────────────────────────────────────────────────────────────
       - name: Install build dependencies
         run: |
@@ -112,7 +111,6 @@ jobs:
       - name: Update & install feeds
         run: |
           cd $WORKSPACE/openwrt
-          # 追加 iStore feed（提供应用商店）
           echo "src-git istore https://github.com/linkease/istore.git;main" \
             >> feeds.conf.default
           ./scripts/feeds update -a
@@ -121,15 +119,11 @@ jobs:
       # ──────────────────────────────────────────────────────────────
       # 5b. 替换 golang 工具链为 sbwml 维护版本
       #
-      #     【问题】immortalwrt 固定 feeds commit 中的 golang 版本较旧，
+      #     immortalwrt 固定 feeds commit 中的 golang 版本较旧，
       #     导致部分需要较新 Go 版本的包（ttyd 等）无法编译。
-      #
-      #     【修复】用 sbwml/packages_lang_golang 替换 feeds 中的 golang 目录。
-      #     该仓库由社区持续维护，提供最新 Go 工具链（1.22+），并预处理了
-      #     CGO 相关依赖，专为 OpenWrt/ImmortalWrt CI 编译环境优化。
-      #
+      #     sbwml 维护版提供最新 Go 工具链（1.22+），专为 OpenWrt CI 优化。
       #     执行时机：feeds install 之后直接替换目录即可，
-      #     package/feeds/packages/golang 的符号链接仍指向此路径，无需重跑 feeds。
+      #     package/feeds/packages/golang 的符号链接无需重跑 feeds。
       # ──────────────────────────────────────────────────────────────
       - name: Replace golang with sbwml maintained version
         run: |
@@ -144,68 +138,93 @@ jobs:
           grep "^PKG_VERSION" \
             $WORKSPACE/openwrt/feeds/packages/lang/golang/Makefile \
             2>/dev/null || \
-          echo "（golang 目录已替换，Makefile 路径请以实际为准）"
+          echo "（golang 目录已替换）"
 
       # ──────────────────────────────────────────────────────────────
       # 6. 修补 feeds
       #
-      #    补丁 A：rust Makefile 禁用 download-ci-llvm
+      #    补丁 C：libxcrypt 双重修复（必须在 feeds install 之后执行）
+      #
+      #      根因（openwrt/packages#22882）：
+      #        libxcrypt <= 4.4.34 的配置脚本
+      #        build-aux/scripts/expand-selected-hashes 在较新 Perl
+      #        上失败，报错：
+      #          BEGIN failed--compilation aborted at
+      #          .../expand-selected-hashes line 28.
+      #          configure: error: bad value 'solaris' for --enable-hashes
+      #        原因是 Perl 对 'open' pragma 的处理方式在新版本中变化。
+      #        修复：升级至 4.4.36（2023-12 官方修复版本）。
+      #        sha256: e5e1f4caee0a01de2aee26e3138807d6d3ca2b8e67287966d1fefd65e1fd8943
+      #
+      #      附加问题（openwrt/packages#18994）：
+      #        CONFIG_PKG_FORTIFY_SOURCE_2=y 启用时，libxcrypt 的
+      #        crypt-bcrypt.c 触发 -Werror=format-nonliteral 编译失败。
+      #        修复：注入 PKG_FORTIFY_SOURCE:=0。
+      #
+      #      已通过 test-libxcrypt.sh 在 libxcrypt-4.4.36 上验证有效。
+      #
+      #    补丁 A：rust 禁用 download-ci-llvm
       #      feeds/packages/lang/rust/Makefile 中的
       #        --set=llvm.download-ci-llvm=true
-      #      会尝试从 ci-artifacts.rust-lang.org 下载预编译 LLVM，
+      #      会从 ci-artifacts.rust-lang.org 下载预编译 LLVM，
       #      但该 URL 对旧版本 Rust 已 404（CI 产物定期清理）。
-      #      修复：改为 false，让 LLVM 从源码本地编译（多花约 20 分钟，但可靠）。
-      #      来源：OpenWrt 官方 commit b49fb106，openwrt/packages #27331。
+      #      修复：改为 false，让 LLVM 从源码本地编译。
+      #      来源：OpenWrt 官方 commit b49fb106，openwrt/packages#27331。
       #
       #    补丁 B：openclash 移除 shadowsocks-rust 强制依赖
-      #      luci-app-openclash 在部分版本通过 Kconfig select 强制拉入
-      #      shadowsocks-rust（需要 Rust 工具链），而 Clash 内核是 Go 编写，
-      #      不需要此依赖。删除后 OpenClash 功能完全不受影响。
-      #      BeeconMini fork 可能已自行移除，此处作为双重保障（无副作用）。
+      #      BeeconMini fork 可能已自行移除，此处作为双重保障。
       # ──────────────────────────────────────────────────────────────
-      - name: Patch feeds - fix Rust LLVM and OpenClash dependency
+      - name: Patch feeds
         run: |
-          # ── 补丁 C：升级 libxcrypt 至 4.4.36（修复 Perl 5.38 兼容性）──
-          # 【根因】immortalwrt 固定 feeds 中的 libxcrypt <= 4.4.34，
-          # 其 build-aux/scripts/BuildCommon.pm 使用了已废弃的 Perl
-          # smartmatch/when 语法，Perl 5.34（Ubuntu 22.04）仅 warning，
-          # Perl 5.38（Ubuntu 24.04）升级为 fatal error，两个环境都受影响。
-          # 【修复】升级至 4.4.36，upstream commit ce562f4d 彻底移除了
-          # given/when/smartmatch 用法。
-          # sha256 来源：Buildroot 官方 patch 已验证。
+          # ── 补丁 C：libxcrypt 双重修复 ───────────────────────────
           LIBXCRYPT_MK="$WORKSPACE/openwrt/feeds/packages/libs/libxcrypt/Makefile"
           if [ -f "$LIBXCRYPT_MK" ]; then
-            echo "=== libxcrypt 版本升级 ==="
+            echo "=== libxcrypt 当前版本 ==="
             grep "^PKG_VERSION" "$LIBXCRYPT_MK"
+
+            # C-1：升级至 4.4.36（修复 expand-selected-hashes Perl 兼容性）
             sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=4.4.36/' "$LIBXCRYPT_MK"
             sed -i 's/^PKG_HASH:=.*/PKG_HASH:=e5e1f4caee0a01de2aee26e3138807d6d3ca2b8e67287966d1fefd65e1fd8943/' "$LIBXCRYPT_MK"
-            grep "^PKG_VERSION\|^PKG_HASH" "$LIBXCRYPT_MK"
-            echo "=== libxcrypt 已升级至 4.4.36 ==="
+
+            # C-2：禁用 fortify（在 include package.mk 行前插入，幂等）
+            if ! grep -q "^PKG_FORTIFY_SOURCE" "$LIBXCRYPT_MK"; then
+              sed -i '/^include.*package\.mk/i PKG_FORTIFY_SOURCE:=0' "$LIBXCRYPT_MK"
+            fi
+
+            echo "=== patch 后关键行 ==="
+            grep -E "^PKG_VERSION|^PKG_HASH|^PKG_FORTIFY" "$LIBXCRYPT_MK"
+
+            # 验证补丁真正生效，失败则立即终止
+            PATCHED_VER=$(grep "^PKG_VERSION" "$LIBXCRYPT_MK" \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            if [ "$PATCHED_VER" != "4.4.36" ]; then
+              echo "ERROR: libxcrypt PKG_VERSION 升级失败（当前: $PATCHED_VER）"
+              exit 1
+            fi
+            echo "=== libxcrypt 双重修复完成并验证 ==="
           else
             echo "WARNING: libxcrypt Makefile 未找到：$LIBXCRYPT_MK"
           fi
 
-          # ── 补丁 A：rust Makefile 禁用 download-ci-llvm ──────────
+          # ── 补丁 A：rust 禁用 download-ci-llvm ──────────────────
           RUST_MK="$WORKSPACE/openwrt/feeds/packages/lang/rust/Makefile"
           if [ -f "$RUST_MK" ]; then
-            echo "=== rust Makefile patch 前 ==="
+            echo "=== rust patch 前 ==="
             grep "download-ci-llvm" "$RUST_MK" || echo "（未找到该行）"
             sed -i 's/download-ci-llvm=true/download-ci-llvm=false/g' "$RUST_MK"
-            echo "=== rust Makefile patch 后 ==="
-            grep "download-ci-llvm" "$RUST_MK"
+            echo "=== rust patch 后 ==="
+            grep "download-ci-llvm" "$RUST_MK" || true
           else
             echo "WARNING: rust Makefile 未找到：$RUST_MK"
           fi
 
-          # ── 补丁 B：openclash 移除 shadowsocks[-_]rust 依赖 ──────
-          # 精确匹配 shadowsocks[-_]rust，避免误删其他 shadowsocks 依赖行
+          # ── 补丁 B：openclash 移除 shadowsocks-rust 依赖 ────────
           OPENCLASH_MK="$WORKSPACE/openwrt/feeds/luci/applications/luci-app-openclash/Makefile"
           if [ -f "$OPENCLASH_MK" ]; then
-            echo "=== openclash shadowsocks-rust 行（patch 前）==="
-            grep -n "shadowsocks[-_]rust" "$OPENCLASH_MK" || echo "（未找到，可能已不存在）"
+            grep -n "shadowsocks[-_]rust" "$OPENCLASH_MK" \
+              || echo "（未找到，可能已不存在）"
             sed -i '/shadowsocks[-_]rust/Id' "$OPENCLASH_MK"
-            echo "=== patch 后残余 shadowsocks 行 ==="
-            grep -n "shadowsocks" "$OPENCLASH_MK" || echo "（干净）"
+            echo "=== openclash patch 完成 ==="
           else
             echo "WARNING: openclash Makefile 未找到：$OPENCLASH_MK"
           fi
@@ -213,12 +232,9 @@ jobs:
       # ──────────────────────────────────────────────────────────────
       # 7a. 集成 OpenAppFilter (OAF)
       #
-      #     来源：destan19/OpenAppFilter（支持抖音/王者荣耀等数百款 App 识别）
-      #
-      #     注意：OAF Kconfig 存在自引用循环依赖 bug：
-      #       "PACKAGE_kmod-oaf is selected by PACKAGE_kmod-oaf"
-      #     导致 make defconfig 跳过 kmod-oaf，进而 luci-app-oaf 无法安装。
-      #     修复：在 seed-ac2.config 中显式声明所有子包 =y 强制选中。
+      #     来源：destan19/OpenAppFilter（支持抖音/王者荣耀等数百款 App）
+      #     注意：OAF Kconfig 存在自引用循环依赖 bug，
+      #     已在 seed-ac2.config 中显式声明所有子包 =y 强制选中。
       # ──────────────────────────────────────────────────────────────
       - name: Integrate OpenAppFilter (OAF)
         run: |
@@ -231,31 +247,23 @@ jobs:
       # ──────────────────────────────────────────────────────────────
       # 7b. 集成 TurboACC（含 SFE 软件流量加速）
       #
-      #     等效于官方 add_turboacc.sh 脚本的手动拆解步骤，便于 CI 可审查。
-      #
       #     【新增包（放入 package/turboacc/）】
       #       luci-app-turboacc — LuCI 管理界面
       #       nft-fullcone      — nftables 全锥型 NAT
       #       shortcut-fe       — SFE 加速引擎
-      #         含：kmod-shortcut-fe / kmod-shortcut-fe-cm / kmod-shortcut-fe-drv
       #
       #     【替换原始包（turboacc 修补版，添加 SFE offload hook）】
-      #       firewall4 → package/network/config/firewall4/
-      #       libnftnl  → package/libs/libnftnl/
-      #       nftables  → package/network/utils/nftables/
+      #       firewall4 / libnftnl / nftables
       #
       #     【内核 patch（kernel 6.6）】
-      #       952：conntrack 多注册者事件支持（SFE hook 必需）→ hack-6.6/
-      #       953：shortcut-fe 额外内核钩子                    → hack-6.6/
-      #       613：netfilter optional tcp window check          → pending-6.6/
-      #
-      #     各 patch 均有多个备用文件名探测，兼容 turboacc 跨版本命名差异。
+      #       952：conntrack 多注册者事件支持（SFE hook 必需）
+      #       953：shortcut-fe 额外内核钩子
+      #       613：netfilter optional tcp window check
       # ──────────────────────────────────────────────────────────────
       - name: Integrate TurboACC (with SFE)
         run: |
           cd $WORKSPACE/openwrt
 
-          # ── 克隆 turboacc 两个分支 ────────────────────────────────
           git clone --depth=1 -b luci \
             https://github.com/chenmozhijin/turboacc.git \
             /tmp/turboacc-luci
@@ -275,7 +283,7 @@ jobs:
             cp -r /tmp/turboacc-pkg/firewall4 package/network/config/firewall4
             echo "=== firewall4 已替换为 turboacc 修补版 ==="
           else
-            echo "WARN: turboacc/firewall4 未找到，跳过替换"
+            echo "WARN: turboacc/firewall4 未找到，跳过"
           fi
 
           if [ -d /tmp/turboacc-pkg/libnftnl ]; then
@@ -283,7 +291,7 @@ jobs:
             cp -r /tmp/turboacc-pkg/libnftnl package/libs/libnftnl
             echo "=== libnftnl 已替换为 turboacc 修补版 ==="
           else
-            echo "WARN: turboacc/libnftnl 未找到，跳过替换"
+            echo "WARN: turboacc/libnftnl 未找到，跳过"
           fi
 
           if [ -d /tmp/turboacc-pkg/nftables ]; then
@@ -291,7 +299,7 @@ jobs:
             cp -r /tmp/turboacc-pkg/nftables package/network/utils/nftables
             echo "=== nftables 已替换为 turboacc 修补版 ==="
           else
-            echo "WARN: turboacc/nftables 未找到，跳过替换"
+            echo "WARN: turboacc/nftables 未找到，跳过"
           fi
 
           # ── 打内核 patch（kernel 6.6）────────────────────────────
@@ -315,7 +323,7 @@ jobs:
           done
           [ $P952_FOUND -eq 0 ] && echo "WARN: patch 952 未找到"
 
-          # patch 953：shortcut-fe 额外内核钩子（遍历所有 953- 开头文件）
+          # patch 953：shortcut-fe 额外内核钩子
           P953_FOUND=0
           for f in $(ls /tmp/turboacc-luci/hack-6.6/953-*.patch 2>/dev/null); do
             cp "$f" "$HACK/"
@@ -338,7 +346,6 @@ jobs:
           done
           [ $P613_FOUND -eq 0 ] && echo "WARN: patch 613 未找到"
 
-          # ── 写入内核 config 项 ───────────────────────────────────
           # CONFIG_NF_CONNTRACK_CHAIN_EVENTS：SFE conntrack hook 必需
           grep -q "CONFIG_NF_CONNTRACK_CHAIN_EVENTS" "$CFG" 2>/dev/null || \
             echo "# CONFIG_NF_CONNTRACK_CHAIN_EVENTS is not set" >> "$CFG"
@@ -361,19 +368,16 @@ jobs:
         run: |
           cd $WORKSPACE/openwrt
 
-          # ── 后端服务 ─────────────────────────────────────────────
           git clone --depth=1 \
             https://github.com/linkease/nas-packages.git \
             /tmp/nas-packages
           cp -r /tmp/nas-packages/network/services/quickstart \
             package/quickstart
 
-          # ── LuCI 前端 ────────────────────────────────────────────
           git clone --depth=1 \
             https://github.com/lq-wq/luci-app-quickstart.git \
             package/luci-app-quickstart
 
-          # ── 移除对 luci-app-store 的强制依赖（避免冲突）──────────
           sed -i 's/ +luci-app-store//g' \
             package/luci-app-quickstart/Makefile 2>/dev/null || true
 
@@ -384,28 +388,13 @@ jobs:
       # 8. 源码级修改
       #
       #    8-A  默认 LAN IP：192.168.1.1 → 192.168.88.1
-      #         直接 sed 修改 package/base-files/files/bin/config_generate。
-      #         该脚本在路由器首次启动时生成 /etc/config/network，
-      #         全量替换确保所有引用此 IP 的地方同步更新。
       #
       #    8-B  kernel vermagic 对齐官方（兼容官方 kmod ipk）
-      #
-      #         【问题根因】
-      #           OpenWrt 编译时通过对 kernel .config.set 做 MD5 生成 vermagic。
-      #           自编译加入了 TurboACC/SFE 等额外 kconfig 项，MD5 与官方
-      #           immortalwrt 24.10.1 不同。固件烧录后执行：
-      #             opkg install kmod-xxx
-      #           会报 "kernel version mismatch"（vermagic 不匹配），
-      #           无法安装任何官方 kmod-*.ipk 包。
-      #
-      #         【修复方法（参考 88660000.xyz）】
-      #           1. 从官方 immortalwrt 24.10.1 下载页面动态提取 vermagic
-      #              （位于 kmods/<kernel_ver>-1-<32位md5>/ 目录名中）
-      #           2. 写入源码根目录 vermagic 文件
-      #           3. patch include/kernel-defaults.mk：
-      #              将 md5 生成行替换为复制 vermagic 文件的命令
-      #           网络获取失败时打印 WARNING 并跳过（不中断编译），
-      #           固件仍可正常使用，仅无法通过 opkg 安装官方 kmod ipk。
+      #         自编译加入 TurboACC/SFE 等额外 kconfig 项导致 MD5
+      #         与官方不同，固件烧录后 opkg install kmod-xxx 会报
+      #         "kernel version mismatch"。
+      #         修复：硬编码官方 vermagic（已人工核实），patch
+      #         include/kernel-defaults.mk 跳过 MD5 计算直接复制。
       # ──────────────────────────────────────────────────────────────
       - name: Patch source - LAN IP and kernel vermagic
         run: |
@@ -414,34 +403,23 @@ jobs:
           # ── 8-A：修改默认 LAN IP ──────────────────────────────────
           sed -i 's/192.168.1.1/192.168.88.1/g' \
             package/base-files/files/bin/config_generate
-          echo "=== LAN IP patch 后（config_generate 中 192.168 相关行）==="
+          echo "=== LAN IP patch 后 ==="
           grep "192\.168\." package/base-files/files/bin/config_generate
 
           # ── 8-B：对齐官方 vermagic ────────────────────────────────
-          #
-          # 官方 immortalwrt 24.10.1 filogic 的 vermagic（已人工核实）：
-          #   来源：https://downloads.immortalwrt.org/releases/24.10.1/
-          #           targets/mediatek/filogic/kmods/
-          #           6.6.86-1-f2c63d42896f12da2b55f2c2b626e7be/
+          # 官方 immortalwrt 24.10.1 filogic vermagic（已人工核实）：
+          #   kmods/6.6.86-1-f2c63d42896f12da2b55f2c2b626e7be/
           #   kernel  : 6.6.86
           #   vermagic: f2c63d42896f12da2b55f2c2b626e7be
-          #
-          # 硬编码比动态抓取更可靠：
-          #   - 避免 bash set -e + grep 无匹配 → exit 1 的陷阱
-          #   - 避免下载页面格式变化导致提取失败
-          #   - 版本固定后 vermagic 不会改变（与 kernel 版本绑定）
-          #   若将来升级到 24.10.x 新版本，请同步更新此处的值。
+          # 硬编码避免动态抓取的不稳定性（bash set -e + grep 无匹配陷阱）。
+          # 若升级到新版本，请同步更新此值。
           VERMAGIC="f2c63d42896f12da2b55f2c2b626e7be"
-
           echo "=== 写入 vermagic: $VERMAGIC ==="
           echo "$VERMAGIC" > vermagic
 
           # patch include/kernel-defaults.mk：
-          #   原始行（约第 130 行）：
-          #     grep '=[ym]' $(LINUX_DIR)/.config.set | LC_ALL=C sort | $(MKHASH) md5 > $(LINUX_DIR)/.vermagic
-          #   替换为：
-          #           cp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic
-          # 使用行内容匹配而非行号，兼容源码轻微变动
+          #   原始行：grep '=[ym]' ... | $(MKHASH) md5 > $(LINUX_DIR)/.vermagic
+          #   替换为：        cp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic
           sed -i \
             '/grep.*\[ym\].*\.config\.set.*MKHASH.*md5.*\.vermagic/c\\t\tcp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic' \
             include/kernel-defaults.mk
@@ -455,8 +433,6 @@ jobs:
       #    两层 cat 合并：
       #      ① mt7981-common.config — MT7981B 平台通用（无 Wi-Fi）
       #      ② seed-ac2.config      — SEED AC2 专属差异
-      #
-      #    make defconfig 补全其余默认值
       # ──────────────────────────────────────────────────────────────
       - name: Merge config & run defconfig
         run: |
@@ -467,9 +443,6 @@ jobs:
             > .config
           make defconfig
 
-          # ── 诊断输出 ─────────────────────────────────────────────
-          echo "=== rust / shadowsocks-rust 相关行 ==="
-          grep -i "CONFIG.*rust" .config || echo "（未选中）"
           echo "=== TurboACC / SFE 相关行 ==="
           grep -iE "shortcut.fe|turboacc|fullcone" .config | head -10 || echo "（未选中）"
           echo "=== dnsmasq 相关行 ==="
@@ -488,7 +461,6 @@ jobs:
         run: |
           cd $WORKSPACE/openwrt
           make download -j$(nproc)
-          # 补救：重试一次，避免偶发网络超时
           make download -j$(nproc) || true
 
       # ──────────────────────────────────────────────────────────────
@@ -515,7 +487,7 @@ jobs:
           ls -lh /tmp/artifacts/
 
       # ──────────────────────────────────────────────────────────────
-      # 13. 上传 GitHub Artifact（便于直接下载，保留 30 天）
+      # 13. 上传 GitHub Artifact（保留 30 天）
       # ──────────────────────────────────────────────────────────────
       - name: Upload build artifact
         uses: actions/upload-artifact@v4.6.2
