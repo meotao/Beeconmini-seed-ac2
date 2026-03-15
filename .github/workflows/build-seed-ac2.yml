@@ -4,6 +4,11 @@ name: Build BeeconMini SEED AC2
 on:
   workflow_dispatch:
 
+# Node.js 24 兼容性：2026-06-02 起 GitHub Actions 强制使用 Node.js 24
+# 此环境变量确保所有 action 在切换前就以 Node.js 24 运行，避免届时构建中断。
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: write
   actions: read
@@ -32,7 +37,7 @@ jobs:
           path: source
 
       # ──────────────────────────────────────────────────────────────
-      # 2. 释放 runner 自带的无用磁盘空间（~5 GB）
+      # 2. 释放 runner 自带的无用磁盘空间（约 5 GB）
       # ──────────────────────────────────────────────────────────────
       - name: Free runner disk space
         run: |
@@ -45,15 +50,49 @@ jobs:
 
       # ──────────────────────────────────────────────────────────────
       # 3. 安装编译依赖
+      #
+      #    在原有基础上新增（均经 immortalwrt prereq-build.mk 验证必需）：
+      #      bison              — 内核编译必需（parser generator）
+      #      libelf-dev         — 内核模块编译必需（提供 libelf.h）
+      #      python3-distutils  — prereq-build.mk 中 TestHostCommand 明确检测，
+      #                           Python 3.10（Ubuntu 22.04 默认）不自带
+      #      python3-setuptools — 部分 Python host 工具依赖
+      #      perl-modules-5.34  — 确保 Perl 模块集完整，防止 libxcrypt 在
+      #                           Perl 5.34 上因缺少模块而构建失败
       # ──────────────────────────────────────────────────────────────
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            build-essential ccache clang cmake cpio curl file flex gawk \
-            gettext git gperf libncurses5-dev libssl-dev python3 rsync \
-            unzip wget zlib1g-dev zstd lib32gcc-s1 libc6-dev-i386 \
-            subversion patch
+            bison \
+            build-essential \
+            ccache \
+            clang \
+            cmake \
+            cpio \
+            curl \
+            file \
+            flex \
+            gawk \
+            gettext \
+            git \
+            gperf \
+            lib32gcc-s1 \
+            libc6-dev-i386 \
+            libelf-dev \
+            libncurses5-dev \
+            libssl-dev \
+            patch \
+            perl-modules-5.34 \
+            python3 \
+            python3-distutils \
+            python3-setuptools \
+            rsync \
+            subversion \
+            unzip \
+            wget \
+            zlib1g-dev \
+            zstd
 
       # ──────────────────────────────────────────────────────────────
       # 4. 克隆 BeeconMini ImmortalWrt（branch 24.10.1）
@@ -65,41 +104,64 @@ jobs:
             $WORKSPACE/openwrt
 
       # ──────────────────────────────────────────────────────────────
-      # 5. 更新 feeds
+      # 5. 更新并安装 feeds
       #    标准 feeds（packages / luci / routing / telephony）来自
       #    仓库内的 feeds.conf.default，固定 commit 保证可复现。
-      #    额外追加 iStore feed 以获取 luci-app-store / luci-app-quickstart
+      #    额外追加 iStore feed 以获取 luci-app-store。
       # ──────────────────────────────────────────────────────────────
       - name: Update & install feeds
         run: |
           cd $WORKSPACE/openwrt
-          # 追加 iStore feed（提供应用商店 & 快速配置向导）
+          # 追加 iStore feed（提供应用商店）
           echo "src-git istore https://github.com/linkease/istore.git;main" \
             >> feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       # ──────────────────────────────────────────────────────────────
-      # 6. 修补 Rust 工具链：禁用 download-ci-llvm
+      # 5b. 替换 golang 工具链为 sbwml 维护版本
       #
-      #    【问题根因 - 已通过社区研究确认】
-      #    feeds/packages/lang/rust/Makefile 中有：
-      #      --set=llvm.download-ci-llvm=true
-      #    这使得编译时尝试从 ci-artifacts.rust-lang.org 下载
-      #    Rust 1.85.0 对应 commit 的预编译 LLVM，但该 URL 已 404
-      #    （Rust CI 只保留最近期构建产物，旧版本会定期清理）。
+      #     【问题】immortalwrt 固定 feeds commit 中的 golang 版本较旧，
+      #     导致部分需要较新 Go 版本的包（ttyd 等）无法编译。
       #
-      #    【官方认可的解决方案】
-      #    来源：OpenWrt 官方 commit b49fb106、OpenWrt Forum、
-      #    openwrt/packages issue #27331
-      #    方法：将 Makefile 中 download-ci-llvm=true 改为 false，
-      #    让 LLVM 从源码本地编译（会多花 ~20 分钟，但可靠）。
+      #     【修复】用 sbwml/packages_lang_golang 替换 feeds 中的 golang 目录。
+      #     该仓库由社区持续维护，提供最新 Go 工具链（1.22+），并预处理了
+      #     CGO 相关依赖，专为 OpenWrt/ImmortalWrt CI 编译环境优化。
       #
-      #    【附加修补：openclash 的 shadowsocks-rust 依赖】
-      #    luci-app-openclash 通过 Kconfig "select" 强制拉入
-      #    shadowsocks-rust，而 Kconfig select 无法被用户 config
-      #    行（=n / is not set）覆盖。删除该依赖行后 OpenClash
-      #    功能不受影响（Clash 内核是 Go 编写，不依赖 Rust）。
+      #     执行时机：feeds install 之后直接替换目录即可，
+      #     package/feeds/packages/golang 的符号链接仍指向此路径，无需重跑 feeds。
+      # ──────────────────────────────────────────────────────────────
+      - name: Replace golang with sbwml maintained version
+        run: |
+          rm -rf $WORKSPACE/openwrt/feeds/packages/lang/golang
+          git clone --depth=1 \
+            https://github.com/sbwml/packages_lang_golang \
+            $WORKSPACE/openwrt/feeds/packages/lang/golang
+          echo "=== golang 版本（替换后）==="
+          grep "^PKG_VERSION" \
+            $WORKSPACE/openwrt/feeds/packages/lang/golang/golang/Makefile \
+            2>/dev/null || \
+          grep "^PKG_VERSION" \
+            $WORKSPACE/openwrt/feeds/packages/lang/golang/Makefile \
+            2>/dev/null || \
+          echo "（golang 目录已替换，Makefile 路径请以实际为准）"
+
+      # ──────────────────────────────────────────────────────────────
+      # 6. 修补 feeds
+      #
+      #    补丁 A：rust Makefile 禁用 download-ci-llvm
+      #      feeds/packages/lang/rust/Makefile 中的
+      #        --set=llvm.download-ci-llvm=true
+      #      会尝试从 ci-artifacts.rust-lang.org 下载预编译 LLVM，
+      #      但该 URL 对旧版本 Rust 已 404（CI 产物定期清理）。
+      #      修复：改为 false，让 LLVM 从源码本地编译（多花约 20 分钟，但可靠）。
+      #      来源：OpenWrt 官方 commit b49fb106，openwrt/packages #27331。
+      #
+      #    补丁 B：openclash 移除 shadowsocks-rust 强制依赖
+      #      luci-app-openclash 在部分版本通过 Kconfig select 强制拉入
+      #      shadowsocks-rust（需要 Rust 工具链），而 Clash 内核是 Go 编写，
+      #      不需要此依赖。删除后 OpenClash 功能完全不受影响。
+      #      BeeconMini fork 可能已自行移除，此处作为双重保障（无副作用）。
       # ──────────────────────────────────────────────────────────────
       - name: Patch feeds - fix Rust LLVM and OpenClash dependency
         run: |
@@ -108,7 +170,6 @@ jobs:
           if [ -f "$RUST_MK" ]; then
             echo "=== rust Makefile patch 前 ==="
             grep "download-ci-llvm" "$RUST_MK" || echo "（未找到该行）"
-            # 将 download-ci-llvm=true 替换为 false
             sed -i 's/download-ci-llvm=true/download-ci-llvm=false/g' "$RUST_MK"
             echo "=== rust Makefile patch 后 ==="
             grep "download-ci-llvm" "$RUST_MK"
@@ -116,12 +177,13 @@ jobs:
             echo "WARNING: rust Makefile 未找到：$RUST_MK"
           fi
 
-          # ── 补丁 B：openclash Makefile 移除 shadowsocks-rust 依赖 ─
+          # ── 补丁 B：openclash 移除 shadowsocks[-_]rust 依赖 ──────
+          # 精确匹配 shadowsocks[-_]rust，避免误删其他 shadowsocks 依赖行
           OPENCLASH_MK="$WORKSPACE/openwrt/feeds/luci/applications/luci-app-openclash/Makefile"
           if [ -f "$OPENCLASH_MK" ]; then
             echo "=== openclash shadowsocks-rust 行（patch 前）==="
-            grep -n "shadowsocks.rust" "$OPENCLASH_MK" || echo "（未找到，可能已不存在）"
-            sed -i '/shadowsocks.rust/Id' "$OPENCLASH_MK"
+            grep -n "shadowsocks[-_]rust" "$OPENCLASH_MK" || echo "（未找到，可能已不存在）"
+            sed -i '/shadowsocks[-_]rust/Id' "$OPENCLASH_MK"
             echo "=== patch 后残余 shadowsocks 行 ==="
             grep -n "shadowsocks" "$OPENCLASH_MK" || echo "（干净）"
           else
@@ -129,30 +191,51 @@ jobs:
           fi
 
       # ──────────────────────────────────────────────────────────────
-      # 7. 集成第三方包：OAF + TurboACC + QuickStart
+      # 7a. 集成 OpenAppFilter (OAF)
+      #
+      #     来源：destan19/OpenAppFilter（支持抖音/王者荣耀等数百款 App 识别）
+      #
+      #     注意：OAF Kconfig 存在自引用循环依赖 bug：
+      #       "PACKAGE_kmod-oaf is selected by PACKAGE_kmod-oaf"
+      #     导致 make defconfig 跳过 kmod-oaf，进而 luci-app-oaf 无法安装。
+      #     修复：在 seed-ac2.config 中显式声明所有子包 =y 强制选中。
       # ──────────────────────────────────────────────────────────────
       - name: Integrate OpenAppFilter (OAF)
         run: |
           git clone --depth=1 \
             https://github.com/destan19/OpenAppFilter.git \
             $WORKSPACE/openwrt/package/OpenAppFilter
+          echo "=== OAF 集成完成 ==="
+          ls $WORKSPACE/openwrt/package/OpenAppFilter/
 
       # ──────────────────────────────────────────────────────────────
-      # 7b. 集成 TurboACC（chenmozhijin/turboacc）
+      # 7b. 集成 TurboACC（含 SFE 软件流量加速）
       #
-      #     turboacc 不在任何标准 feed 中，需手动集成：
-      #       luci 分支  → luci-app-turboacc（LuCI 包，放到 package/）
-      #       package 分支 → nft-fullcone（全锥型 NAT，放到 package/）
-      #     内核 6.6 还需打两个 patch：
-      #       952-add-net-conntrack-events-support-multiple-registrant.patch
-      #       613-netfilter_optional_tcp_window_check.patch
-      #     注：不启用 SFE（--no-sfe），软件流量分载用 firewall4 自带即可
+      #     等效于官方 add_turboacc.sh 脚本的手动拆解步骤，便于 CI 可审查。
+      #
+      #     【新增包（放入 package/turboacc/）】
+      #       luci-app-turboacc — LuCI 管理界面
+      #       nft-fullcone      — nftables 全锥型 NAT
+      #       shortcut-fe       — SFE 加速引擎
+      #         含：kmod-shortcut-fe / kmod-shortcut-fe-cm / kmod-shortcut-fe-drv
+      #
+      #     【替换原始包（turboacc 修补版，添加 SFE offload hook）】
+      #       firewall4 → package/network/config/firewall4/
+      #       libnftnl  → package/libs/libnftnl/
+      #       nftables  → package/network/utils/nftables/
+      #
+      #     【内核 patch（kernel 6.6）】
+      #       952：conntrack 多注册者事件支持（SFE hook 必需）→ hack-6.6/
+      #       953：shortcut-fe 额外内核钩子                    → hack-6.6/
+      #       613：netfilter optional tcp window check          → pending-6.6/
+      #
+      #     各 patch 均有多个备用文件名探测，兼容 turboacc 跨版本命名差异。
       # ──────────────────────────────────────────────────────────────
-      - name: Integrate TurboACC
+      - name: Integrate TurboACC (with SFE)
         run: |
           cd $WORKSPACE/openwrt
 
-          # ── 克隆源码 ─────────────────────────────────────────────
+          # ── 克隆 turboacc 两个分支 ────────────────────────────────
           git clone --depth=1 -b luci \
             https://github.com/chenmozhijin/turboacc.git \
             /tmp/turboacc-luci
@@ -160,10 +243,36 @@ jobs:
             https://github.com/chenmozhijin/turboacc.git \
             /tmp/turboacc-pkg
 
-          # ── 放置包目录 ───────────────────────────────────────────
+          # ── 放置新增包 ────────────────────────────────────────────
           mkdir -p package/turboacc
           cp -r /tmp/turboacc-luci/luci-app-turboacc  package/turboacc/
           cp -r /tmp/turboacc-pkg/nft-fullcone         package/turboacc/
+          cp -r /tmp/turboacc-pkg/shortcut-fe          package/turboacc/
+
+          # ── 替换 firewall4 / libnftnl / nftables ─────────────────
+          if [ -d /tmp/turboacc-pkg/firewall4 ]; then
+            rm -rf package/network/config/firewall4
+            cp -r /tmp/turboacc-pkg/firewall4 package/network/config/firewall4
+            echo "=== firewall4 已替换为 turboacc 修补版 ==="
+          else
+            echo "WARN: turboacc/firewall4 未找到，跳过替换"
+          fi
+
+          if [ -d /tmp/turboacc-pkg/libnftnl ]; then
+            rm -rf package/libs/libnftnl
+            cp -r /tmp/turboacc-pkg/libnftnl package/libs/libnftnl
+            echo "=== libnftnl 已替换为 turboacc 修补版 ==="
+          else
+            echo "WARN: turboacc/libnftnl 未找到，跳过替换"
+          fi
+
+          if [ -d /tmp/turboacc-pkg/nftables ]; then
+            rm -rf package/network/utils/nftables
+            cp -r /tmp/turboacc-pkg/nftables package/network/utils/nftables
+            echo "=== nftables 已替换为 turboacc 修补版 ==="
+          else
+            echo "WARN: turboacc/nftables 未找到，跳过替换"
+          fi
 
           # ── 打内核 patch（kernel 6.6）────────────────────────────
           HACK=target/linux/generic/hack-6.6
@@ -171,35 +280,68 @@ jobs:
           CFG=target/linux/generic/config-6.6
           mkdir -p "$HACK" "$PEND"
 
-          cp /tmp/turboacc-luci/hack-6.6/952-add-net-conntrack-events-support-multiple-registrant.patch \
-             "$HACK/" 2>/dev/null || \
-          cp /tmp/turboacc-luci/hack-6.6/952-net-conntrack-events-support-multiple-registrant.patch \
-             "$HACK/" 2>/dev/null || echo "WARN: 952 patch not found"
+          # patch 952：conntrack 多注册者事件（SFE 必需）
+          P952_FOUND=0
+          for f in \
+            "952-add-net-conntrack-events-support-multiple-registrant.patch" \
+            "952-net-conntrack-events-support-multiple-registrant.patch" \
+            "952-net-conntrack-events.patch"
+          do
+            if [ -f "/tmp/turboacc-luci/hack-6.6/$f" ]; then
+              cp "/tmp/turboacc-luci/hack-6.6/$f" "$HACK/"
+              echo "=== 已应用 patch 952: $f ==="
+              P952_FOUND=1; break
+            fi
+          done
+          [ $P952_FOUND -eq 0 ] && echo "WARN: patch 952 未找到"
 
-          cp /tmp/turboacc-luci/pending-6.6/613-netfilter_optional_tcp_window_check.patch \
-             "$PEND/" 2>/dev/null || echo "WARN: 613 patch not found"
+          # patch 953：shortcut-fe 额外内核钩子（遍历所有 953- 开头文件）
+          P953_FOUND=0
+          for f in $(ls /tmp/turboacc-luci/hack-6.6/953-*.patch 2>/dev/null); do
+            cp "$f" "$HACK/"
+            echo "=== 已应用 $(basename $f) ==="
+            P953_FOUND=1
+          done
+          [ $P953_FOUND -eq 0 ] && echo "WARN: patch 953 未找到"
+
+          # patch 613：netfilter optional tcp window check
+          P613_FOUND=0
+          for f in \
+            "613-netfilter_optional_tcp_window_check.patch" \
+            "613-netfilter_optional_tcp_window_check_v2.patch"
+          do
+            if [ -f "/tmp/turboacc-luci/pending-6.6/$f" ]; then
+              cp "/tmp/turboacc-luci/pending-6.6/$f" "$PEND/"
+              echo "=== 已应用 patch 613: $f ==="
+              P613_FOUND=1; break
+            fi
+          done
+          [ $P613_FOUND -eq 0 ] && echo "WARN: patch 613 未找到"
 
           # ── 写入内核 config 项 ───────────────────────────────────
+          # CONFIG_NF_CONNTRACK_CHAIN_EVENTS：SFE conntrack hook 必需
           grep -q "CONFIG_NF_CONNTRACK_CHAIN_EVENTS" "$CFG" 2>/dev/null || \
             echo "# CONFIG_NF_CONNTRACK_CHAIN_EVENTS is not set" >> "$CFG"
 
           echo "=== TurboACC 集成完成 ==="
-          ls package/turboacc/
+          echo "  package/turboacc/: $(ls package/turboacc/)"
+          echo "  hack-6.6 patches:    $(ls $HACK/9[0-9][0-9]-*.patch 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
+          echo "  pending-6.6 patches: $(ls $PEND/6[0-9][0-9]-*.patch 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
 
       # ──────────────────────────────────────────────────────────────
-      # 7c. 集成 QuickStart（lq-wq/luci-app-quickstart）
+      # 7c. 集成 QuickStart（快速配置向导）
       #
-      #     quickstart 已从 iStore feed 移除，需独立 clone：
-      #       后端服务: linkease/nas-packages → network/services/quickstart
-      #       LuCI 前端: lq-wq/luci-app-quickstart（用户指定源）
-      #     同时移除 luci-app-quickstart 对 luci-app-store 的强制依赖
-      #     （避免版本冲突，iStore 已通过 feed 单独集成）
+      #     quickstart 不在任何标准 feed 中，需独立 clone：
+      #       后端服务: linkease/nas-packages → package/quickstart
+      #       LuCI 前端: lq-wq/luci-app-quickstart → package/luci-app-quickstart
+      #     移除 luci-app-quickstart 对 luci-app-store 的强制依赖，
+      #     避免与 iStore feed 版本冲突。
       # ──────────────────────────────────────────────────────────────
       - name: Integrate QuickStart
         run: |
           cd $WORKSPACE/openwrt
 
-          # ── 后端服务（quickstart daemon）────────────────────────
+          # ── 后端服务 ─────────────────────────────────────────────
           git clone --depth=1 \
             https://github.com/linkease/nas-packages.git \
             /tmp/nas-packages
@@ -219,17 +361,80 @@ jobs:
           ls package/quickstart package/luci-app-quickstart
 
       # ──────────────────────────────────────────────────────────────
-      # 8. 合并配置 & make defconfig
+      # 8. 源码级修改
+      #
+      #    8-A  默认 LAN IP：192.168.1.1 → 192.168.88.1
+      #         直接 sed 修改 package/base-files/files/bin/config_generate。
+      #         该脚本在路由器首次启动时生成 /etc/config/network，
+      #         全量替换确保所有引用此 IP 的地方同步更新。
+      #
+      #    8-B  kernel vermagic 对齐官方（兼容官方 kmod ipk）
+      #
+      #         【问题根因】
+      #           OpenWrt 编译时通过对 kernel .config.set 做 MD5 生成 vermagic。
+      #           自编译加入了 TurboACC/SFE 等额外 kconfig 项，MD5 与官方
+      #           immortalwrt 24.10.1 不同。固件烧录后执行：
+      #             opkg install kmod-xxx
+      #           会报 "kernel version mismatch"（vermagic 不匹配），
+      #           无法安装任何官方 kmod-*.ipk 包。
+      #
+      #         【修复方法（参考 88660000.xyz）】
+      #           1. 从官方 immortalwrt 24.10.1 下载页面动态提取 vermagic
+      #              （位于 kmods/<kernel_ver>-1-<32位md5>/ 目录名中）
+      #           2. 写入源码根目录 vermagic 文件
+      #           3. patch include/kernel-defaults.mk：
+      #              将 md5 生成行替换为复制 vermagic 文件的命令
+      #           网络获取失败时打印 WARNING 并跳过（不中断编译），
+      #           固件仍可正常使用，仅无法通过 opkg 安装官方 kmod ipk。
+      # ──────────────────────────────────────────────────────────────
+      - name: Patch source - LAN IP and kernel vermagic
+        run: |
+          cd $WORKSPACE/openwrt
+
+          # ── 8-A：修改默认 LAN IP ──────────────────────────────────
+          sed -i 's/192.168.1.1/192.168.88.1/g' \
+            package/base-files/files/bin/config_generate
+          echo "=== LAN IP patch 后（config_generate 中 192.168 相关行）==="
+          grep "192\.168\." package/base-files/files/bin/config_generate
+
+          # ── 8-B：对齐官方 vermagic ────────────────────────────────
+          # 从官方 immortalwrt 24.10.1 filogic 目录提取 vermagic（32位 md5）
+          # 目录格式：kmods/6.6.XX-1-<32位md5哈希>/
+          OFFICIAL_PAGE="https://downloads.immortalwrt.org/releases/24.10.1/targets/mediatek/filogic/"
+          VERMAGIC=$(curl -sL --max-time 30 "$OFFICIAL_PAGE" \
+            | grep -oE 'kmods/[0-9.]+-1-[a-f0-9]{32}' \
+            | head -1 \
+            | grep -oE '[a-f0-9]{32}')
+
+          if [ -n "$VERMAGIC" ]; then
+            echo "=== 官方 immortalwrt 24.10.1 filogic vermagic: $VERMAGIC ==="
+            echo "$VERMAGIC" > vermagic
+
+            # patch include/kernel-defaults.mk：
+            #   原始行：grep '=[ym]' $(LINUX_DIR)/.config.set | LC_ALL=C sort | $(MKHASH) md5 > $(LINUX_DIR)/.vermagic
+            #   替换为：        cp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic
+            # 使用行内容匹配而非行号，兼容源码轻微变动
+            sed -i \
+              '/grep.*\[ym\].*\.config\.set.*MKHASH.*md5.*\.vermagic/c\\t\tcp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic' \
+              include/kernel-defaults.mk
+
+            echo "=== kernel-defaults.mk vermagic 相关行（patch 后）==="
+            grep -n "vermagic" include/kernel-defaults.mk
+          else
+            echo "WARNING: 无法从官方页面获取 vermagic（网络问题？）"
+            echo "  跳过 vermagic patch，编译继续。"
+            echo "  后果：固件安装后无法通过 opkg 安装官方 kmod-*.ipk 包。"
+            echo "  手动修复：将正确 vermagic 写入源码根目录 vermagic 文件后重新触发构建。"
+          fi
+
+      # ──────────────────────────────────────────────────────────────
+      # 9. 合并配置 & make defconfig
       #
       #    两层 cat 合并：
       #      ① mt7981-common.config — MT7981B 平台通用（无 Wi-Fi）
       #      ② seed-ac2.config      — SEED AC2 专属差异
-      #         · subtarget=filogic（非 mt7981，已从源码确认）
-      #         · kmod-switch-rtl8373 + kmod-i2c-gpio（RTL8373 交换芯片）
-      #         · PoE / OAF / OpenClash / NLBW / VLMCSD 等应用包
       #
-      #    make defconfig 补全其余默认值，并自动拉入 DEVICE_PACKAGES 中
-      #    声明的 kmod-switch-rtl8373 / kmod-fs-f2fs / kmod-fs-ext4 等
+      #    make defconfig 补全其余默认值
       # ──────────────────────────────────────────────────────────────
       - name: Merge config & run defconfig
         run: |
@@ -239,22 +444,33 @@ jobs:
             $GITHUB_WORKSPACE/source/configs/seed-ac2.config \
             > .config
           make defconfig
-          # 诊断：确认 rust 编译选项状态
-          echo "=== .config 中 rust / shadowsocks-rust 相关行 ==="
-          grep -i "CONFIG.*rust" .config || echo "（rust 相关包未被选中）"
+
+          # ── 诊断输出 ─────────────────────────────────────────────
+          echo "=== rust / shadowsocks-rust 相关行 ==="
+          grep -i "CONFIG.*rust" .config || echo "（未选中）"
+          echo "=== TurboACC / SFE 相关行 ==="
+          grep -iE "shortcut.fe|turboacc|fullcone" .config | head -10 || echo "（未选中）"
+          echo "=== dnsmasq 相关行 ==="
+          grep -i "dnsmasq" .config | head -5
+          echo "=== PoE 相关行 ==="
+          grep -iE "poe|poemgr" .config | head -5 || echo "（未选中）"
+          echo "=== LAN IP 验证 ==="
+          grep "192\.168\." package/base-files/files/bin/config_generate | head -3
+          echo "=== vermagic 文件内容 ==="
+          cat vermagic 2>/dev/null || echo "（vermagic 文件未生成）"
 
       # ──────────────────────────────────────────────────────────────
-      # 9. 下载所有源码包（并行 + 失败重试）
+      # 10. 下载所有源码包（并行 + 失败重试）
       # ──────────────────────────────────────────────────────────────
       - name: Download package sources
         run: |
           cd $WORKSPACE/openwrt
           make download -j$(nproc)
-          # 补救：重试一次避免偶发网络超时导致失败
+          # 补救：重试一次，避免偶发网络超时
           make download -j$(nproc) || true
 
       # ──────────────────────────────────────────────────────────────
-      # 10. 编译固件
+      # 11. 编译固件
       #     先并行编译；失败后以单线程 + 详细日志重试便于排查
       # ──────────────────────────────────────────────────────────────
       - name: Compile firmware
@@ -263,7 +479,7 @@ jobs:
           make -j$(nproc) || make -j1 V=s
 
       # ──────────────────────────────────────────────────────────────
-      # 11. 收集固件产物
+      # 12. 收集固件产物
       # ──────────────────────────────────────────────────────────────
       - name: Collect firmware artifacts
         run: |
@@ -277,7 +493,7 @@ jobs:
           ls -lh /tmp/artifacts/
 
       # ──────────────────────────────────────────────────────────────
-      # 12. 上传 GitHub Artifact（便于直接下载，30 天保留）
+      # 13. 上传 GitHub Artifact（便于直接下载，保留 30 天）
       # ──────────────────────────────────────────────────────────────
       - name: Upload build artifact
         uses: actions/upload-artifact@v4.6.2
@@ -287,7 +503,7 @@ jobs:
           retention-days: 30
 
       # ──────────────────────────────────────────────────────────────
-      # 13. 生成 Release Tag（格式：yyyymmdd + run_number）
+      # 14. 生成 Release Tag（格式：yyyymmdd + run_number）
       # ──────────────────────────────────────────────────────────────
       - name: Generate release tag
         id: tag
@@ -295,7 +511,7 @@ jobs:
           echo "TAG=$(date +%Y%m%d)${{ github.run_number }}" >> $GITHUB_OUTPUT
 
       # ──────────────────────────────────────────────────────────────
-      # 14. 发布 GitHub Release
+      # 15. 发布 GitHub Release
       # ──────────────────────────────────────────────────────────────
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2.3.2
@@ -314,7 +530,7 @@ jobs:
             **硬件规格**
             | 项目 | 参数 |
             |------|------|
-            | CPU | MT7981B (Filogic 820) |
+            | CPU | MT7981B (Filogic 820, Cortex-A53 ×2) |
             | 交换芯片 | RTL8373（8×2.5G PoE+） |
             | WAN PHY | RTL8221B（2.5G） |
             | 存储 | 1G RAM + 64G eMMC |
@@ -322,16 +538,20 @@ jobs:
             | PoE 单口最大功率 | 30W |
 
             **固件包含功能**
-            - PoE 管理（RTL8238B，8 口 PoE+）
+            - PoE 管理（RTL8238B，8 口 PoE+，realtek-poe + poemgr）
             - OpenClash（透明代理）
-            - OAF 应用过滤（OpenAppFilter，支持抖音/王者荣耀等数百款 App）
-            - NLBW（实时带宽监控）
+            - OAF 应用过滤（OpenAppFilter，支持抖音 / 王者荣耀等数百款 App）
+            - NLBW 实时带宽监控（nlbwmon）
             - VLMCSD（KMS 激活服务器）
             - ttyd（Web 终端）
             - iStore 应用商店 + QuickStart 快速配置
+            - File Manager（Web 文件管理器）
             - 定时重启
-            - TurboACC MTK HW NAT 硬件加速
+            - TurboACC 网络加速（SFE 软件流量分载 + nft-fullcone 全锥型 NAT）
             - eQoS 带宽控制 / UPnP
+            - dnsmasq-full（含 DNSSEC / ipset 支持）
+            - 默认 LAN IP：192.168.88.1
+            - kernel vermagic 对齐官方，可直接 opkg 安装官方 kmod-*.ipk
 
             **刷机说明**
             - `*sysupgrade*` — 从 OpenWrt/ImmortalWrt 在线升级
