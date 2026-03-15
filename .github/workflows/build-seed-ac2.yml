@@ -398,34 +398,36 @@ jobs:
           grep "192\.168\." package/base-files/files/bin/config_generate
 
           # ── 8-B：对齐官方 vermagic ────────────────────────────────
-          # 从官方 immortalwrt 24.10.1 filogic 目录提取 vermagic（32位 md5）
-          # 目录格式：kmods/6.6.XX-1-<32位md5哈希>/
-          OFFICIAL_PAGE="https://downloads.immortalwrt.org/releases/24.10.1/targets/mediatek/filogic/"
-          VERMAGIC=$(curl -sL --max-time 30 "$OFFICIAL_PAGE" \
-            | grep -oE 'kmods/[0-9.]+-1-[a-f0-9]{32}' \
-            | head -1 \
-            | grep -oE '[a-f0-9]{32}')
+          #
+          # 官方 immortalwrt 24.10.1 filogic 的 vermagic（已人工核实）：
+          #   来源：https://downloads.immortalwrt.org/releases/24.10.1/
+          #           targets/mediatek/filogic/kmods/
+          #           6.6.86-1-f2c63d42896f12da2b55f2c2b626e7be/
+          #   kernel  : 6.6.86
+          #   vermagic: f2c63d42896f12da2b55f2c2b626e7be
+          #
+          # 硬编码比动态抓取更可靠：
+          #   - 避免 bash set -e + grep 无匹配 → exit 1 的陷阱
+          #   - 避免下载页面格式变化导致提取失败
+          #   - 版本固定后 vermagic 不会改变（与 kernel 版本绑定）
+          #   若将来升级到 24.10.x 新版本，请同步更新此处的值。
+          VERMAGIC="f2c63d42896f12da2b55f2c2b626e7be"
 
-          if [ -n "$VERMAGIC" ]; then
-            echo "=== 官方 immortalwrt 24.10.1 filogic vermagic: $VERMAGIC ==="
-            echo "$VERMAGIC" > vermagic
+          echo "=== 写入 vermagic: $VERMAGIC ==="
+          echo "$VERMAGIC" > vermagic
 
-            # patch include/kernel-defaults.mk：
-            #   原始行：grep '=[ym]' $(LINUX_DIR)/.config.set | LC_ALL=C sort | $(MKHASH) md5 > $(LINUX_DIR)/.vermagic
-            #   替换为：        cp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic
-            # 使用行内容匹配而非行号，兼容源码轻微变动
-            sed -i \
-              '/grep.*\[ym\].*\.config\.set.*MKHASH.*md5.*\.vermagic/c\\t\tcp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic' \
-              include/kernel-defaults.mk
+          # patch include/kernel-defaults.mk：
+          #   原始行（约第 130 行）：
+          #     grep '=[ym]' $(LINUX_DIR)/.config.set | LC_ALL=C sort | $(MKHASH) md5 > $(LINUX_DIR)/.vermagic
+          #   替换为：
+          #           cp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic
+          # 使用行内容匹配而非行号，兼容源码轻微变动
+          sed -i \
+            '/grep.*\[ym\].*\.config\.set.*MKHASH.*md5.*\.vermagic/c\\t\tcp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic' \
+            include/kernel-defaults.mk
 
-            echo "=== kernel-defaults.mk vermagic 相关行（patch 后）==="
-            grep -n "vermagic" include/kernel-defaults.mk
-          else
-            echo "WARNING: 无法从官方页面获取 vermagic（网络问题？）"
-            echo "  跳过 vermagic patch，编译继续。"
-            echo "  后果：固件安装后无法通过 opkg 安装官方 kmod-*.ipk 包。"
-            echo "  手动修复：将正确 vermagic 写入源码根目录 vermagic 文件后重新触发构建。"
-          fi
+          echo "=== kernel-defaults.mk vermagic 相关行（patch 后）==="
+          grep -n "vermagic" include/kernel-defaults.mk
 
       # ──────────────────────────────────────────────────────────────
       # 9. 合并配置 & make defconfig
