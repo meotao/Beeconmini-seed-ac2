@@ -165,6 +165,26 @@ jobs:
       # ──────────────────────────────────────────────────────────────
       - name: Patch feeds - fix Rust LLVM and OpenClash dependency
         run: |
+          # ── 补丁 C：升级 libxcrypt 至 4.4.36（修复 Perl 5.38 兼容性）──
+          # 【根因】immortalwrt 固定 feeds 中的 libxcrypt <= 4.4.34，
+          # 其 build-aux/scripts/BuildCommon.pm 使用了已废弃的 Perl
+          # smartmatch/when 语法，Perl 5.34（Ubuntu 22.04）仅 warning，
+          # Perl 5.38（Ubuntu 24.04）升级为 fatal error，两个环境都受影响。
+          # 【修复】升级至 4.4.36，upstream commit ce562f4d 彻底移除了
+          # given/when/smartmatch 用法。
+          # sha256 来源：Buildroot 官方 patch 已验证。
+          LIBXCRYPT_MK="$WORKSPACE/openwrt/feeds/packages/libs/libxcrypt/Makefile"
+          if [ -f "$LIBXCRYPT_MK" ]; then
+            echo "=== libxcrypt 版本升级 ==="
+            grep "^PKG_VERSION" "$LIBXCRYPT_MK"
+            sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=4.4.36/' "$LIBXCRYPT_MK"
+            sed -i 's/^PKG_HASH:=.*/PKG_HASH:=e5e1f4caee0a01de2aee26e3138807d6d3ca2b8e67287966d1fefd65e1fd8943/' "$LIBXCRYPT_MK"
+            grep "^PKG_VERSION\|^PKG_HASH" "$LIBXCRYPT_MK"
+            echo "=== libxcrypt 已升级至 4.4.36 ==="
+          else
+            echo "WARNING: libxcrypt Makefile 未找到：$LIBXCRYPT_MK"
+          fi
+
           # ── 补丁 A：rust Makefile 禁用 download-ci-llvm ──────────
           RUST_MK="$WORKSPACE/openwrt/feeds/packages/lang/rust/Makefile"
           if [ -f "$RUST_MK" ]; then
