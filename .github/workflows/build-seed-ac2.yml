@@ -27,7 +27,7 @@ jobs:
       # 1. 检出本仓库（包含 configs/ 目录）
       # ──────────────────────────────────────────────────────────────
       - name: Checkout this repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           path: source
 
@@ -202,7 +202,7 @@ jobs:
       # 12. 上传 GitHub Artifact（便于直接下载，30 天保留）
       # ──────────────────────────────────────────────────────────────
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: beeconmini-seed-ac2-${{ github.run_number }}
           path: /tmp/artifacts/
@@ -220,7 +220,7 @@ jobs:
       # 14. 发布 GitHub Release
       # ──────────────────────────────────────────────────────────────
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.3.2
         if: success()
         with:
           tag_name: ${{ steps.tag.outputs.TAG }}
