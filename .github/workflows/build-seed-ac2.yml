@@ -129,16 +129,94 @@ jobs:
           fi
 
       # ──────────────────────────────────────────────────────────────
-      # 7. 集成 OpenAppFilter（OAF 应用过滤）
-      #    官方推荐方式：clone 到 package/ 目录，无需 feeds
-      #    启用 CONFIG_PACKAGE_luci-app-oaf=y，make defconfig 自动拉入：
-      #      kmod-oaf（内核模块）/ oaf（服务守护进程）/ luci-app-oaf（LuCI 页面）
+      # 7. 集成第三方包：OAF + TurboACC + QuickStart
       # ──────────────────────────────────────────────────────────────
       - name: Integrate OpenAppFilter (OAF)
         run: |
           git clone --depth=1 \
             https://github.com/destan19/OpenAppFilter.git \
             $WORKSPACE/openwrt/package/OpenAppFilter
+
+      # ──────────────────────────────────────────────────────────────
+      # 7b. 集成 TurboACC（chenmozhijin/turboacc）
+      #
+      #     turboacc 不在任何标准 feed 中，需手动集成：
+      #       luci 分支  → luci-app-turboacc（LuCI 包，放到 package/）
+      #       package 分支 → nft-fullcone（全锥型 NAT，放到 package/）
+      #     内核 6.6 还需打两个 patch：
+      #       952-add-net-conntrack-events-support-multiple-registrant.patch
+      #       613-netfilter_optional_tcp_window_check.patch
+      #     注：不启用 SFE（--no-sfe），软件流量分载用 firewall4 自带即可
+      # ──────────────────────────────────────────────────────────────
+      - name: Integrate TurboACC
+        run: |
+          cd $WORKSPACE/openwrt
+
+          # ── 克隆源码 ─────────────────────────────────────────────
+          git clone --depth=1 -b luci \
+            https://github.com/chenmozhijin/turboacc.git \
+            /tmp/turboacc-luci
+          git clone --depth=1 -b package \
+            https://github.com/chenmozhijin/turboacc.git \
+            /tmp/turboacc-pkg
+
+          # ── 放置包目录 ───────────────────────────────────────────
+          mkdir -p package/turboacc
+          cp -r /tmp/turboacc-luci/luci-app-turboacc  package/turboacc/
+          cp -r /tmp/turboacc-pkg/nft-fullcone         package/turboacc/
+
+          # ── 打内核 patch（kernel 6.6）────────────────────────────
+          HACK=target/linux/generic/hack-6.6
+          PEND=target/linux/generic/pending-6.6
+          CFG=target/linux/generic/config-6.6
+          mkdir -p "$HACK" "$PEND"
+
+          cp /tmp/turboacc-luci/hack-6.6/952-add-net-conntrack-events-support-multiple-registrant.patch \
+             "$HACK/" 2>/dev/null || \
+          cp /tmp/turboacc-luci/hack-6.6/952-net-conntrack-events-support-multiple-registrant.patch \
+             "$HACK/" 2>/dev/null || echo "WARN: 952 patch not found"
+
+          cp /tmp/turboacc-luci/pending-6.6/613-netfilter_optional_tcp_window_check.patch \
+             "$PEND/" 2>/dev/null || echo "WARN: 613 patch not found"
+
+          # ── 写入内核 config 项 ───────────────────────────────────
+          grep -q "CONFIG_NF_CONNTRACK_CHAIN_EVENTS" "$CFG" 2>/dev/null || \
+            echo "# CONFIG_NF_CONNTRACK_CHAIN_EVENTS is not set" >> "$CFG"
+
+          echo "=== TurboACC 集成完成 ==="
+          ls package/turboacc/
+
+      # ──────────────────────────────────────────────────────────────
+      # 7c. 集成 QuickStart（lq-wq/luci-app-quickstart）
+      #
+      #     quickstart 已从 iStore feed 移除，需独立 clone：
+      #       后端服务: linkease/nas-packages → network/services/quickstart
+      #       LuCI 前端: lq-wq/luci-app-quickstart（用户指定源）
+      #     同时移除 luci-app-quickstart 对 luci-app-store 的强制依赖
+      #     （避免版本冲突，iStore 已通过 feed 单独集成）
+      # ──────────────────────────────────────────────────────────────
+      - name: Integrate QuickStart
+        run: |
+          cd $WORKSPACE/openwrt
+
+          # ── 后端服务（quickstart daemon）────────────────────────
+          git clone --depth=1 \
+            https://github.com/linkease/nas-packages.git \
+            /tmp/nas-packages
+          cp -r /tmp/nas-packages/network/services/quickstart \
+            package/quickstart
+
+          # ── LuCI 前端 ────────────────────────────────────────────
+          git clone --depth=1 \
+            https://github.com/lq-wq/luci-app-quickstart.git \
+            package/luci-app-quickstart
+
+          # ── 移除对 luci-app-store 的强制依赖（避免冲突）──────────
+          sed -i 's/ +luci-app-store//g' \
+            package/luci-app-quickstart/Makefile 2>/dev/null || true
+
+          echo "=== QuickStart 集成完成 ==="
+          ls package/quickstart package/luci-app-quickstart
 
       # ──────────────────────────────────────────────────────────────
       # 8. 合并配置 & make defconfig
