@@ -180,7 +180,7 @@ jobs:
           LIBXCRYPT_MK="$WORKSPACE/openwrt/feeds/packages/libs/libxcrypt/Makefile"
           if [ -f "$LIBXCRYPT_MK" ]; then
             echo "=== libxcrypt 当前版本 ==="
-            grep "^PKG_VERSION" "$LIBXCRYPT_MK"
+            grep "^PKG_VERSION" "$LIBXCRYPT_MK" || true
 
             # C-1：升级至 4.4.36（修复 expand-selected-hashes Perl 兼容性）
             sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=4.4.36/' "$LIBXCRYPT_MK"
@@ -244,116 +244,14 @@ jobs:
           echo "=== OAF 集成完成 ==="
           ls $WORKSPACE/openwrt/package/OpenAppFilter/
 
-      # ──────────────────────────────────────────────────────────────
-      # 7b. 集成 TurboACC（含 SFE 软件流量加速）
-      #
-      #     【新增包（放入 package/turboacc/）】
-      #       luci-app-turboacc — LuCI 管理界面
-      #       nft-fullcone      — nftables 全锥型 NAT
-      #       shortcut-fe       — SFE 加速引擎
-      #
-      #     【替换原始包（turboacc 修补版，添加 SFE offload hook）】
-      #       firewall4 / libnftnl / nftables
-      #
-      #     【内核 patch（kernel 6.6）】
-      #       952：conntrack 多注册者事件支持（SFE hook 必需）
-      #       953：shortcut-fe 额外内核钩子
-      #       613：netfilter optional tcp window check
-      # ──────────────────────────────────────────────────────────────
-      - name: Integrate TurboACC (with SFE)
-        run: |
-          cd $WORKSPACE/openwrt
+          # appfilter symlink 修复：
+          # open-app-filter 嵌套在非标准父目录，扫描器无法注册，
+          # 编译报 "No rule to make target"。
+          # 修复：顶层 symlink 使扫描器直接找到该包。
+          ln -sfn $WORKSPACE/openwrt/package/OpenAppFilter/open-app-filter \
+                  $WORKSPACE/openwrt/package/open-app-filter
+          echo "=== appfilter symlink 创建完成 ==="
 
-          git clone --depth=1 -b luci \
-            https://github.com/chenmozhijin/turboacc.git \
-            /tmp/turboacc-luci
-          git clone --depth=1 -b package \
-            https://github.com/chenmozhijin/turboacc.git \
-            /tmp/turboacc-pkg
-
-          # ── 放置新增包 ────────────────────────────────────────────
-          mkdir -p package/turboacc
-          cp -r /tmp/turboacc-luci/luci-app-turboacc  package/turboacc/
-          cp -r /tmp/turboacc-pkg/nft-fullcone         package/turboacc/
-          cp -r /tmp/turboacc-pkg/shortcut-fe          package/turboacc/
-
-          # ── 替换 firewall4 / libnftnl / nftables ─────────────────
-          if [ -d /tmp/turboacc-pkg/firewall4 ]; then
-            rm -rf package/network/config/firewall4
-            cp -r /tmp/turboacc-pkg/firewall4 package/network/config/firewall4
-            echo "=== firewall4 已替换为 turboacc 修补版 ==="
-          else
-            echo "WARN: turboacc/firewall4 未找到，跳过"
-          fi
-
-          if [ -d /tmp/turboacc-pkg/libnftnl ]; then
-            rm -rf package/libs/libnftnl
-            cp -r /tmp/turboacc-pkg/libnftnl package/libs/libnftnl
-            echo "=== libnftnl 已替换为 turboacc 修补版 ==="
-          else
-            echo "WARN: turboacc/libnftnl 未找到，跳过"
-          fi
-
-          if [ -d /tmp/turboacc-pkg/nftables ]; then
-            rm -rf package/network/utils/nftables
-            cp -r /tmp/turboacc-pkg/nftables package/network/utils/nftables
-            echo "=== nftables 已替换为 turboacc 修补版 ==="
-          else
-            echo "WARN: turboacc/nftables 未找到，跳过"
-          fi
-
-          # ── 打内核 patch（kernel 6.6）────────────────────────────
-          HACK=target/linux/generic/hack-6.6
-          PEND=target/linux/generic/pending-6.6
-          CFG=target/linux/generic/config-6.6
-          mkdir -p "$HACK" "$PEND"
-
-          # patch 952：conntrack 多注册者事件（SFE 必需）
-          P952_FOUND=0
-          for f in \
-            "952-add-net-conntrack-events-support-multiple-registrant.patch" \
-            "952-net-conntrack-events-support-multiple-registrant.patch" \
-            "952-net-conntrack-events.patch"
-          do
-            if [ -f "/tmp/turboacc-luci/hack-6.6/$f" ]; then
-              cp "/tmp/turboacc-luci/hack-6.6/$f" "$HACK/"
-              echo "=== 已应用 patch 952: $f ==="
-              P952_FOUND=1; break
-            fi
-          done
-          [ $P952_FOUND -eq 0 ] && echo "WARN: patch 952 未找到"
-
-          # patch 953：shortcut-fe 额外内核钩子
-          P953_FOUND=0
-          for f in $(ls /tmp/turboacc-luci/hack-6.6/953-*.patch 2>/dev/null); do
-            cp "$f" "$HACK/"
-            echo "=== 已应用 $(basename $f) ==="
-            P953_FOUND=1
-          done
-          [ $P953_FOUND -eq 0 ] && echo "WARN: patch 953 未找到"
-
-          # patch 613：netfilter optional tcp window check
-          P613_FOUND=0
-          for f in \
-            "613-netfilter_optional_tcp_window_check.patch" \
-            "613-netfilter_optional_tcp_window_check_v2.patch"
-          do
-            if [ -f "/tmp/turboacc-luci/pending-6.6/$f" ]; then
-              cp "/tmp/turboacc-luci/pending-6.6/$f" "$PEND/"
-              echo "=== 已应用 patch 613: $f ==="
-              P613_FOUND=1; break
-            fi
-          done
-          [ $P613_FOUND -eq 0 ] && echo "WARN: patch 613 未找到"
-
-          # CONFIG_NF_CONNTRACK_CHAIN_EVENTS：SFE conntrack hook 必需
-          grep -q "CONFIG_NF_CONNTRACK_CHAIN_EVENTS" "$CFG" 2>/dev/null || \
-            echo "# CONFIG_NF_CONNTRACK_CHAIN_EVENTS is not set" >> "$CFG"
-
-          echo "=== TurboACC 集成完成 ==="
-          echo "  package/turboacc/: $(ls package/turboacc/)"
-          echo "  hack-6.6 patches:    $(ls $HACK/9[0-9][0-9]-*.patch 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
-          echo "  pending-6.6 patches: $(ls $PEND/6[0-9][0-9]-*.patch 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
 
       # ──────────────────────────────────────────────────────────────
       # 7c. 集成 QuickStart（快速配置向导）
@@ -390,7 +288,7 @@ jobs:
       #    8-A  默认 LAN IP：192.168.1.1 → 192.168.88.1
       #
       #    8-B  kernel vermagic 对齐官方（兼容官方 kmod ipk）
-      #         自编译加入 TurboACC/SFE 等额外 kconfig 项导致 MD5
+      #         使用固定 vermagic 确保模块与内核一致
       #         与官方不同，固件烧录后 opkg install kmod-xxx 会报
       #         "kernel version mismatch"。
       #         修复：硬编码官方 vermagic（已人工核实），patch
@@ -443,8 +341,6 @@ jobs:
             > .config
           make defconfig
 
-          echo "=== TurboACC / SFE 相关行 ==="
-          grep -iE "shortcut.fe|turboacc|fullcone" .config | head -10 || echo "（未选中）"
           echo "=== dnsmasq 相关行 ==="
           grep -i "dnsmasq" .config | head -5
           echo "=== PoE 相关行 ==="
