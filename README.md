@@ -1,146 +1,91 @@
-# BeeconMini SEED AC2 固件自动构建
-
-基于 [BeeconMini/immortalwrt](https://github.com/BeeconMini/immortalwrt)（branch `24.10.1`）为 BeeconMini SEED AC2 定制的 OpenWrt 固件自动构建仓库。
-
----
+# ImmortalWrt + TurboACC 编译 (BeeconMini SEED AC2)
 
 ## 硬件规格
 
-| 项目         | 参数                                         |
-| ------------ | -------------------------------------------- |
-| CPU          | MT7981B（Filogic 820，ARM Cortex-A53 ×2）    |
-| 交换芯片     | RTL8373（8×2.5G，MDIO 总线）                 |
-| PoE 控制器   | RTL8238B（I2C-GPIO，GPIO46/47）              |
-| WAN PHY      | RTL8221B（2.5G，MDIO addr=7）                |
-| 端口         | 1×WAN 2.5G + 8×LAN 2.5G PoE+（单口最大 30W） |
-| 内存 / 存储  | 1G RAM + 64G eMMC                            |
-| Wi-Fi        | 无                                           |
-| 固件升级方式 | eMMC（`emmc_do_upgrade`）                    |
-
----
+| 组件 | 型号 | 说明 |
+|------|------|------|
+| CPU | MT7981B | MediaTek Filogic |
+| 交换芯片 | RTL8373 | 企业级 2.5G 网管交换芯片 (MDIO) |
+| PoE 控制器 | RTL8238B | I2C-GPIO (GPIO46/47) |
+| WAN PHY | RTL8221B | MDIO addr 7, SGMII |
+| 端口 | 1×WAN 2.5G + 8×LAN 2.5G PoE+ | 单口最大 30W |
+| 内存/存储 | 1GB + 64GB eMMC | |
+| Wi-Fi | 无 | |
 
 ## 固件功能
 
-| 功能             | 说明                                                         |
-| ---------------- | ------------------------------------------------------------ |
-| **PoE 管理**     | RTL8238B 控制 8 口 PoE+，单口最大 30W                        |
-| **OAF 应用过滤** | [OpenAppFilter](https://github.com/destan19/OpenAppFilter)，支持抖音、王者荣耀等数百款 App 过滤 |
-| **OpenClash**    | 透明代理，支持 Clash 规则                                    |
-| **NLBW**         | Netlink 实时带宽监控                                         |
-| **VLMCSD**       | KMS 激活服务器                                               |
-| **ttyd**         | 浏览器内 Web 终端                                            |
-| **iStore**       | 应用商店（第三方 feed）                                      |
-| **QuickStart**   | 快速配置向导                                                 |
-| **定时重启**     | 按计划自动重启                                               |
-| **TurboACC**     | MTK HW NAT 硬件加速（WED offload）                           |
-| **eQoS**         | MTK 带宽控制                                                 |
-| **UPnP**         | miniupnpd                                                    |
-| **主题**         | Argon + Bootstrap-Mod                                        |
+- **TurboACC**: Flow Offload + Fullcone NAT + BBR + SFE
+- **OpenClash**: 代理工具
+- **OAF**: 应用过滤 (OpenAppFilter)
+- **QuickStart**: iStore 快速入门
+- **NLBW**: 网络带宽监控
+- **vlmcsd**: KMS 激活工具
+- **PoE 管理**: realtek-poe + poemgr
+- **默认 LAN IP**: 192.168.88.1
 
----
+## 使用方法
 
-## 仓库结构
+1. Fork 本仓库
+2. 进入 Actions → "Build BeeconMini SEED AC2" → Run workflow
+3. 编译完成后在 Releases 下载固件
+
+## 配置结构
 
 ```
-.
-├── .github/
-│   └── workflows/
-│       └── build-seed-ac2.yml   # 构建 workflow（仅手动触发）
-├── configs/
-│   ├── mt7981-common.config     # MT7981B 平台通用层（无 Wi-Fi）
-│   └── seed-ac2.config          # SEED AC2 设备差异层
-└── README.md
+.github/workflows/build-seed-ac2.yml  ← 唯一 workflow
+configs/mt7981-common.config           ← MT7981 平台通用配置
+configs/seed-ac2.config                ← SEED AC2 设备差异配置
 ```
 
-### 配置分层说明
+Workflow 通过 `cat` 合并两层配置后执行 `make defconfig`。
 
-```
-mt7981-common.config          ← 平台层：内核选项、kmod、库、通用工具包
-       +
-seed-ac2.config               ← 设备层：机型声明、RTL8373 驱动、PoE、应用包
-       ↓  cat 合并
-     .config  →  make defconfig  →  编译
-```
+## 已知问题与经验总结
 
-`seed-ac2.config` 开头声明的设备型号会覆盖平台层，`make defconfig` 自动补全其余默认值并拉入 `DEVICE_PACKAGES`（`kmod-switch-rtl8373`、`kmod-fs-f2fs`、`kmod-fs-ext4` 等）。
+### TurboACC + SFE 集成要点
 
----
+1. **必须使用官方 `add_turboacc.sh`**，不要手动拆解仓库结构。turboacc 的 package 分支使用版本化子目录 (`firewall4-<VERSION>/firewall4/`)，手动 clone 路径错误率极高。
 
-## 构建说明
+2. **`add_turboacc.sh` 写入 `config-6.6` 的是禁用语法**：脚本写入 `# CONFIG_SHORTCUT_FE is not set` 和 `# CONFIG_NF_CONNTRACK_CHAIN_EVENTS is not set`，必须在脚本运行后手动改为 `=y`。否则 patch 953 的 `#ifdef CONFIG_SHORTCUT_FE` 不生效，`fast_forwarded` 字段不存在，SFE 编译失败。
 
-### 触发构建
+3. **patch 953 中 `fast_forwarded` 的注入位置**：patch 953 在 `csum_not_inet:1` 行后注入 `fast_forwarded:1`，但 `csum_not_inet:1` 本身在 `#if IS_ENABLED(CONFIG_IP_SCTP)` 块内。如果 `CONFIG_IP_SCTP` 未启用，`fast_forwarded` 也被跳过。全量构建时只要 `CONFIG_SHORTCUT_FE=y` 正确设置就没问题（patch 953 有自己的 `#ifdef` 守卫），但增量编译环境需要特别注意。
 
-进入仓库 → **Actions** → `Build BeeconMini SEED AC2` → **Run workflow**
+4. **ImmortalWrt 自带 fullcone 支持**：ImmortalWrt 有自己的 `fullconenat-nft` 包和 firewall4/nftables/libnftnl 补丁。`add_turboacc.sh` 替换这三个包后，必须移除 `fullconenat-nft` 避免冲突。
 
-构建完成后固件自动发布为 GitHub Release，Tag 格式为 `yyyymmdd<run_number>`。
+### Kconfig 自引用 Bug
 
-### 构建流程
+`kmod-nft-fullcone` 和 `kmod-oaf` 都有 Kconfig 自引用循环依赖 bug（`PACKAGE_kmod-xxx is selected by PACKAGE_kmod-xxx`），`make defconfig` 会静默跳过这些包。解决方案是在 `.config` 中显式声明 `=y`。
 
-```
-1. 挂载 /mnt 临时盘（150 GB）
-2. 检出本仓库
-3. 释放 runner 磁盘空间
-4. 安装编译依赖
-5. git clone BeeconMini/immortalwrt (branch 24.10.1)
-6. feeds update & install（含 iStore feed）
-7. git clone OpenAppFilter → package/OpenAppFilter
-8. cat 两层 config → .config，make defconfig
-9. make download
-10. make -j$(nproc)（失败自动降级为 make -j1 V=s）
-11. 收集固件 → 上传 Artifact + 发布 Release
-```
+### Rust / LLVM 404
 
-### 本地编译
+`lang/rust` 编译时从 `ci-artifacts.rust-lang.org` 下载预编译 LLVM，URL 经常 404。修复方案：`sed -i 's/download-ci-llvm=true/download-ci-llvm=false/g'`，让 LLVM 本地编译。
 
-```bash
-# 克隆本仓库
-git clone https://github.com/<your-name>/beeconmini-seed-ac2.git
-cd beeconmini-seed-ac2
+### libxcrypt 编译失败
 
-# 克隆上游源码
-git clone --depth=1 -b 24.10.1 \
-  https://github.com/BeeconMini/immortalwrt.git
-cd immortalwrt
+libxcrypt ≤4.4.34 的 `expand-selected-hashes` 脚本在 Perl 5.34+ 上崩溃。修复：升级到 4.4.36 + 注入 `PKG_FORTIFY_SOURCE:=0`。
 
-# 添加 iStore feed
-echo "src-git istore https://github.com/linkease/istore.git;main" \
-  >> feeds.conf.default
+### OpenClash shadowsocks-rust
 
-# 更新 feeds
-./scripts/feeds update -a && ./scripts/feeds install -a
+OpenClash 通过 Kconfig `select` 拉入 `shadowsocks-rust`，用户配置文件中的 `is not set` 无法覆盖 `select` 语义。必须在 workflow 中 `sed` 删除 Makefile 里的依赖行。
 
-# 集成 OAF
-git clone --depth=1 \
-  https://github.com/destan19/OpenAppFilter.git \
-  package/OpenAppFilter
+### 包名易错汇总
 
-# 合并配置
-cat ../configs/mt7981-common.config \
-    ../configs/seed-ac2.config \
-    > .config
-make defconfig
+| 错误名称 | 正确名称 |
+|----------|----------|
+| `luci-app-turboacc-mtk` | `luci-app-turboacc` |
+| `kmod-poe` / `poe-cli` / `luci-app-poe` | `realtek-poe` + `poemgr` |
+| `nlbw` / `luci-app-nlbw` | `nlbwmon` / `luci-app-nlbwmon` |
+| `kmod-rtl8373` | `kmod-switch-rtl8373` |
+| `CONFIG_TARGET_mediatek_mt7981` | `CONFIG_TARGET_mediatek_filogic` |
 
-# 编译
-make -j$(nproc)
-```
+### RTL8373 驱动版本问题
 
----
+`rtl8373.ko` 是预编译二进制 (`vermagic=6.6.73`)，但 immortalwrt 24.10.1 使用 kernel 6.6.86。运行时 `insmod` 可能因版本不匹配而失败。这只能由 BeeconMini 更新 .ko 解决。
 
-## 刷机说明
+## 鸣谢
 
-| 文件               | 用途                            |
-| ------------------ | ------------------------------- |
-| `*sysupgrade*.bin` | 从 OpenWrt/ImmortalWrt 在线升级 |
-| `*factory*.bin`    | 从原厂固件首次刷入              |
-
-> **注意**：SEED AC2 使用 eMMC 存储，升级后配置数据保存在独立分区（`rootfs_data`），刷机不会丢失配置。
-
----
-
-## 技术说明
-
-- **subtarget**：`mediatek/filogic`（非 `mt7981`，已从上游 `Makefile` 确认 `SUBTARGETS:=filogic mt7622 mt7623 mt7629`）
-- **交换架构**：DSA（`filogic/config-6.6` 中 `CONFIG_NET_DSA=y`，无 `swconfig`）
-- **RTL8373 驱动**：`package/kernel/rtl8373`（`PKG_NAME:=switch-rtl8373`，依赖 `kmod-i2c-gpio`）
-- **PoE 控制**：RTL8238B 通过 I2C-GPIO 桥接（DTS 节点 `i2c_rtl8238b`，`scl=GPIO46 / sda=GPIO47`）
-- **OAF 集成**：clone 到 `package/` 目录（官方推荐方式），无需 feeds，`luci-app-oaf=y` 自动拉入 `kmod-oaf` + `oaf` + `luci-app-oaf`
+- [chenmozhijin/turboacc](https://github.com/chenmozhijin/turboacc)
+- [chenmozhijin/OpenWrt-K](https://github.com/chenmozhijin/OpenWrt-K)
+- [BeeconMini/immortalwrt](https://github.com/BeeconMini/immortalwrt)
+- [destan19/OpenAppFilter](https://github.com/destan19/OpenAppFilter)
+- [lq-wq/luci-app-quickstart](https://github.com/lq-wq/luci-app-quickstart)
+- [sbwml/packages_lang_golang](https://github.com/sbwml/packages_lang_golang)
