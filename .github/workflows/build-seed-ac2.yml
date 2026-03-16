@@ -1,455 +1,463 @@
+#=====================================================================
+# Build ImmortalWrt 24.10.1 + TurboACC (SFE) for BeeconMini SEED AC2
+# 目标: mediatek/filogic (mt7981b) | 内核: 6.6
+# 源码: BeeconMini/immortalwrt  Commit: 9d076a1
+#
+# 本 workflow 吸取了大量实际编译调试经验（详见 README.md）
+#=====================================================================
+
 name: Build BeeconMini SEED AC2
 
-# 仅手动触发
 on:
   workflow_dispatch:
+    inputs:
+      enable_sfe:
+        description: '启用 Shortcut-FE'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      enable_ssh:
+        description: '启用 SSH 调试 (tmate)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
-# Node.js 24 兼容性：2026-06-02 起 GitHub Actions 强制使用 Node.js 24
-# 此环境变量确保所有 action 在切换前就以 Node.js 24 运行，避免届时构建中断。
 env:
+  REPO_URL: https://github.com/BeeconMini/immortalwrt
+  REPO_BRANCH: main
+  REPO_COMMIT: 9d076a1
+  TZ: Asia/Shanghai
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-permissions:
-  contents: write
-  actions: read
+  # 工作目录
+  WORKSPACE: /workdir
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 360
 
     steps:
-      # ──────────────────────────────────────────────────────────────
-      # 0. 把构建目录挂到 runner 的 150 GB 临时盘（/mnt）
-      #    避免系统盘（约 14 GB）编译中途爆满
-      # ──────────────────────────────────────────────────────────────
-      - name: Mount build workspace to /mnt
-        run: |
-          sudo mkdir -p /mnt/openwrt
-          sudo chown runner:runner /mnt/openwrt
-          echo "WORKSPACE=/mnt/openwrt" >> $GITHUB_ENV
+    # ================================================================
+    # Step 1: 释放磁盘空间
+    # ================================================================
+    - name: 释放磁盘空间
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
 
-      # ──────────────────────────────────────────────────────────────
-      # 1. 检出本仓库（包含 configs/ 目录）
-      # ──────────────────────────────────────────────────────────────
-      - name: Checkout this repo
-        uses: actions/checkout@v4.2.2
-        with:
-          path: source
+    # ================================================================
+    # Step 2: 检出本仓库
+    # ================================================================
+    - name: 检出本仓库
+      uses: actions/checkout@v4.2.2
 
-      # ──────────────────────────────────────────────────────────────
-      # 2. 释放 runner 自带的无用磁盘空间（约 5 GB）
-      # ──────────────────────────────────────────────────────────────
-      - name: Free runner disk space
-        run: |
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /opt/ghc \
-            /opt/hostedtoolcache \
-            /usr/local/lib/android \
-            || true
+    # ================================================================
+    # Step 3: 初始化编译环境
+    # 经验教训:
+    #   - 必须包含 bison (内核编译)
+    #   - 必须包含 libelf-dev (内核模块编译)
+    #   - 必须包含 python3-distutils (prereq-build.mk 检测)
+    #   - 必须包含 perl-modules-5.34 (libxcrypt 兼容)
+    # ================================================================
+    - name: 初始化编译环境
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y \
+          ack antlr3 asciidoc autoconf automake autopoint binutils bison \
+          build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler \
+          ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev \
+          gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
+          libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+          libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev \
+          libtool lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full \
+          patch pkgconf python3 python3-pip python3-ply python3-docutils \
+          python3-pyelftools python3-distutils python3-setuptools \
+          qemu-utils re2c rsync scons squashfs-tools subversion \
+          swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd \
+          perl-modules-5.34
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p $WORKSPACE
+        sudo chown $USER:$GROUPS $WORKSPACE
 
-      # ──────────────────────────────────────────────────────────────
-      # 3. 安装编译依赖
-      #
-      #    Ubuntu 22.04 (runner) 特殊处理：
-      #      perl-modules-5.34  — 确保 Perl 5.34 模块集完整
-      #      python3-distutils  — Ubuntu 22.04 Python 3.10 不自带，
-      #                           prereq-build.mk 明确检测此工具
-      #      python3-setuptools — 部分 Python host 工具依赖
-      #      bison              — 内核编译必需（parser generator）
-      #      libelf-dev         — 内核模块编译必需（提供 libelf.h）
-      # ──────────────────────────────────────────────────────────────
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            bison \
-            build-essential \
-            ccache \
-            clang \
-            cmake \
-            cpio \
-            curl \
-            file \
-            flex \
-            gawk \
-            gettext \
-            git \
-            gperf \
-            lib32gcc-s1 \
-            libc6-dev-i386 \
-            libelf-dev \
-            libncurses5-dev \
-            libssl-dev \
-            patch \
-            perl-modules-5.34 \
-            python3 \
-            python3-distutils \
-            python3-setuptools \
-            rsync \
-            subversion \
-            unzip \
-            wget \
-            zlib1g-dev \
-            zstd
+    # ================================================================
+    # Step 4: 克隆 ImmortalWrt 源码
+    # ================================================================
+    - name: 克隆 ImmortalWrt 源码
+      working-directory: ${{ env.WORKSPACE }}
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL openwrt
+        cd openwrt
+        if [ -n "$REPO_COMMIT" ]; then
+          echo ">>> Checking out commit: $REPO_COMMIT"
+          git checkout $REPO_COMMIT
+        fi
 
-      # ──────────────────────────────────────────────────────────────
-      # 4. 克隆 BeeconMini ImmortalWrt（branch 24.10.1）
-      # ──────────────────────────────────────────────────────────────
-      - name: Clone ImmortalWrt source
-        run: |
-          git clone --depth=1 -b 24.10.1 \
-            https://github.com/BeeconMini/immortalwrt.git \
-            $WORKSPACE/openwrt
+    # ================================================================
+    # Step 5: 整合 TurboACC (使用官方 add_turboacc.sh)
+    #
+    # 经验教训:
+    #   - 绝对不要手动拆解 turboacc 仓库结构，直接调用官方脚本
+    #   - turboacc package 分支使用版本化子目录 (firewall4-<VER>/firewall4/)
+    #   - add_turboacc.sh 会自动处理版本匹配和路径
+    #   - add_turboacc.sh 向 config-6.6 写入的是 "is not set" (禁用)
+    #     必须在脚本运行后手动改为 =y
+    # ================================================================
+    - name: 整合 TurboACC
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      env:
+        ENABLE_SFE: ${{ github.event.inputs.enable_sfe || 'true' }}
+      run: |
+        echo "============================================"
+        echo "  整合 TurboACC | SFE: ${ENABLE_SFE}"
+        echo "============================================"
 
-      # ──────────────────────────────────────────────────────────────
-      # 5. 更新并安装 feeds
-      #    标准 feeds（packages / luci / routing / telephony）来自
-      #    仓库内的 feeds.conf.default，固定 commit 保证可复现。
-      #    额外追加 iStore feed 以获取 luci-app-store。
-      # ──────────────────────────────────────────────────────────────
-      - name: Update & install feeds
-        run: |
-          cd $WORKSPACE/openwrt
-          echo "src-git istore https://github.com/linkease/istore.git;main" \
-            >> feeds.conf.default
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+        # 确保非交互式运行（预删除旧目录）
+        rm -rf ./package/turboacc
 
-      # ──────────────────────────────────────────────────────────────
-      # 5b. 替换 golang 工具链为 sbwml 维护版本
-      #
-      #     immortalwrt 固定 feeds commit 中的 golang 版本较旧，
-      #     导致部分需要较新 Go 版本的包（ttyd 等）无法编译。
-      #     sbwml 维护版提供最新 Go 工具链（1.22+），专为 OpenWrt CI 优化。
-      #     执行时机：feeds install 之后直接替换目录即可，
-      #     package/feeds/packages/golang 的符号链接无需重跑 feeds。
-      # ──────────────────────────────────────────────────────────────
-      - name: Replace golang with sbwml maintained version
-        run: |
-          rm -rf $WORKSPACE/openwrt/feeds/packages/lang/golang
-          git clone --depth=1 \
-            https://github.com/sbwml/packages_lang_golang \
-            $WORKSPACE/openwrt/feeds/packages/lang/golang
-          echo "=== golang 版本（替换后）==="
-          grep "^PKG_VERSION" \
-            $WORKSPACE/openwrt/feeds/packages/lang/golang/golang/Makefile \
-            2>/dev/null || \
-          grep "^PKG_VERSION" \
-            $WORKSPACE/openwrt/feeds/packages/lang/golang/Makefile \
-            2>/dev/null || \
-          echo "（golang 目录已替换）"
+        # 下载并执行官方脚本
+        curl -sSL https://raw.githubusercontent.com/chenmozhijin/turboacc/luci/add_turboacc.sh \
+          -o add_turboacc.sh
+        chmod +x add_turboacc.sh
 
-      # ──────────────────────────────────────────────────────────────
-      # 6. 修补 feeds
-      #
-      #    补丁 C：libxcrypt 双重修复（必须在 feeds install 之后执行）
-      #
-      #      根因（openwrt/packages#22882）：
-      #        libxcrypt <= 4.4.34 的配置脚本
-      #        build-aux/scripts/expand-selected-hashes 在较新 Perl
-      #        上失败，报错：
-      #          BEGIN failed--compilation aborted at
-      #          .../expand-selected-hashes line 28.
-      #          configure: error: bad value 'solaris' for --enable-hashes
-      #        原因是 Perl 对 'open' pragma 的处理方式在新版本中变化。
-      #        修复：升级至 4.4.36（2023-12 官方修复版本）。
-      #        sha256: e5e1f4caee0a01de2aee26e3138807d6d3ca2b8e67287966d1fefd65e1fd8943
-      #
-      #      附加问题（openwrt/packages#18994）：
-      #        CONFIG_PKG_FORTIFY_SOURCE_2=y 启用时，libxcrypt 的
-      #        crypt-bcrypt.c 触发 -Werror=format-nonliteral 编译失败。
-      #        修复：注入 PKG_FORTIFY_SOURCE:=0。
-      #
-      #      已通过 test-libxcrypt.sh 在 libxcrypt-4.4.36 上验证有效。
-      #
-      #    补丁 A：rust 禁用 download-ci-llvm
-      #      feeds/packages/lang/rust/Makefile 中的
-      #        --set=llvm.download-ci-llvm=true
-      #      会从 ci-artifacts.rust-lang.org 下载预编译 LLVM，
-      #      但该 URL 对旧版本 Rust 已 404（CI 产物定期清理）。
-      #      修复：改为 false，让 LLVM 从源码本地编译。
-      #      来源：OpenWrt 官方 commit b49fb106，openwrt/packages#27331。
-      #
-      #    补丁 B：openclash 移除 shadowsocks-rust 强制依赖
-      #      BeeconMini fork 可能已自行移除，此处作为双重保障。
-      # ──────────────────────────────────────────────────────────────
-      - name: Patch feeds
-        run: |
-          # ── 补丁 C：libxcrypt 双重修复 ───────────────────────────
-          LIBXCRYPT_MK="$WORKSPACE/openwrt/feeds/packages/libs/libxcrypt/Makefile"
-          if [ -f "$LIBXCRYPT_MK" ]; then
-            echo "=== libxcrypt 当前版本 ==="
-            grep "^PKG_VERSION" "$LIBXCRYPT_MK" || true
+        if [ "${ENABLE_SFE}" = "true" ]; then
+          bash add_turboacc.sh
+        else
+          bash add_turboacc.sh --no-sfe
+        fi
 
-            # C-1：升级至 4.4.36（修复 expand-selected-hashes Perl 兼容性）
-            sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=4.4.36/' "$LIBXCRYPT_MK"
-            sed -i 's/^PKG_HASH:=.*/PKG_HASH:=e5e1f4caee0a01de2aee26e3138807d6d3ca2b8e67287966d1fefd65e1fd8943/' "$LIBXCRYPT_MK"
+        # ---- 关键修复: add_turboacc.sh 写入的是 "is not set" ----
+        # 必须改为 =y，否则 patch 953 的 #ifdef CONFIG_SHORTCUT_FE 不生效
+        CFG="./target/linux/generic/config-6.6"
 
-            # C-2：禁用 fortify（在 include package.mk 行前插入，幂等）
-            if ! grep -q "^PKG_FORTIFY_SOURCE" "$LIBXCRYPT_MK"; then
-              sed -i '/^include.*package\.mk/i PKG_FORTIFY_SOURCE:=0' "$LIBXCRYPT_MK"
-            fi
+        # CONFIG_NF_CONNTRACK_CHAIN_EVENTS
+        sed -i 's/^# CONFIG_NF_CONNTRACK_CHAIN_EVENTS is not set/CONFIG_NF_CONNTRACK_CHAIN_EVENTS=y/' "$CFG"
+        grep -q "^CONFIG_NF_CONNTRACK_CHAIN_EVENTS=y" "$CFG" \
+          || echo "CONFIG_NF_CONNTRACK_CHAIN_EVENTS=y" >> "$CFG"
 
-            echo "=== patch 后关键行 ==="
-            grep -E "^PKG_VERSION|^PKG_HASH|^PKG_FORTIFY" "$LIBXCRYPT_MK"
+        # CONFIG_SHORTCUT_FE (仅 SFE 模式)
+        if [ "${ENABLE_SFE}" = "true" ]; then
+          sed -i 's/^# CONFIG_SHORTCUT_FE is not set/CONFIG_SHORTCUT_FE=y/' "$CFG"
+          grep -q "^CONFIG_SHORTCUT_FE=y" "$CFG" \
+            || echo "CONFIG_SHORTCUT_FE=y" >> "$CFG"
+        fi
 
-            # 验证补丁真正生效，失败则立即终止
-            PATCHED_VER=$(grep "^PKG_VERSION" "$LIBXCRYPT_MK" \
-              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-            if [ "$PATCHED_VER" != "4.4.36" ]; then
-              echo "ERROR: libxcrypt PKG_VERSION 升级失败（当前: $PATCHED_VER）"
-              exit 1
-            fi
-            echo "=== libxcrypt 双重修复完成并验证 ==="
-          else
-            echo "WARNING: libxcrypt Makefile 未找到：$LIBXCRYPT_MK"
+        # ---- 验证 ----
+        echo "=== config-6.6 关键配置 ==="
+        grep -E "CONNTRACK_CHAIN|SHORTCUT_FE" "$CFG" || echo "(none)"
+
+        echo "=== 验证文件就位 ==="
+        ls ./package/turboacc/luci-app-turboacc/Makefile && echo "✓ luci-app-turboacc"
+        ls ./package/turboacc/nft-fullcone/Makefile && echo "✓ nft-fullcone"
+        [ "${ENABLE_SFE}" = "true" ] && ls ./package/turboacc/shortcut-fe/ && echo "✓ shortcut-fe"
+        ls ./package/network/config/firewall4/Makefile && echo "✓ firewall4 (replaced)"
+        ls ./package/network/utils/nftables/Makefile && echo "✓ nftables (replaced)"
+        ls ./package/libs/libnftnl/Makefile && echo "✓ libnftnl (replaced)"
+        ls ./target/linux/generic/hack-6.6/952-* && echo "✓ patch 952"
+        [ "${ENABLE_SFE}" = "true" ] && ls ./target/linux/generic/hack-6.6/953-* && echo "✓ patch 953"
+        [ "${ENABLE_SFE}" = "true" ] && ls ./target/linux/generic/pending-6.6/613-* && echo "✓ patch 613"
+
+    # ================================================================
+    # Step 5b: 处理 ImmortalWrt 自带 fullcone 冲突
+    #
+    # 经验教训:
+    #   - ImmortalWrt 自带 fullconenat-nft 包和 firewall4 fullcone 补丁
+    #   - add_turboacc.sh 已替换 firewall4/nftables/libnftnl
+    #   - 必须移除自带的 fullconenat-nft 避免编译冲突
+    # ================================================================
+    - name: 处理 fullcone 包冲突
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      run: |
+        [ -d "./package/network/utils/fullconenat-nft" ] && {
+          echo ">>> 移除 ImmortalWrt 自带的 fullconenat-nft"
+          rm -rf ./package/network/utils/fullconenat-nft
+        }
+        [ -d "./package/network/utils/fullconenat" ] && {
+          echo ">>> 移除 fullconenat (iptables 版本)"
+          rm -rf ./package/network/utils/fullconenat
+        }
+
+    # ================================================================
+    # Step 5c: 整合 OpenAppFilter
+    #
+    # 经验教训:
+    #   - kmod-oaf 有 Kconfig 自引用循环依赖 bug
+    #   - open-app-filter 目录嵌套在 OpenAppFilter/ 下，需要创建 symlink
+    # ================================================================
+    - name: 整合 OpenAppFilter
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      run: |
+        git clone --depth=1 \
+          https://github.com/destan19/OpenAppFilter.git \
+          package/OpenAppFilter
+
+        # 修复: open-app-filter 在非标准父目录下，需要 symlink
+        ln -sf OpenAppFilter/open-app-filter package/open-app-filter
+        echo "✓ OpenAppFilter + symlink"
+
+    # ================================================================
+    # Step 5d: 整合 QuickStart
+    # ================================================================
+    - name: 整合 QuickStart
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      run: |
+        # 后端服务
+        git clone --depth=1 \
+          https://github.com/linkease/nas-packages.git \
+          /tmp/nas-packages
+        cp -r /tmp/nas-packages/network/services/quickstart \
+          package/quickstart
+
+        # LuCI 前端
+        git clone --depth=1 \
+          https://github.com/lq-wq/luci-app-quickstart.git \
+          package/luci-app-quickstart
+
+        # 移除对 luci-app-store 的强制依赖
+        QS_MK="package/luci-app-quickstart/Makefile"
+        if [ -f "$QS_MK" ]; then
+          sed -i 's/+luci-app-store//g' "$QS_MK"
+        fi
+        echo "✓ QuickStart"
+
+    # ================================================================
+    # Step 6: 更新 & 安装 feeds
+    # ================================================================
+    - name: 更新 feeds
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      run: |
+        # 追加 iStore feed (固定 main 分支)
+        grep -q "istore" feeds.conf.default || \
+          echo "src-git istore https://github.com/linkease/istore.git;main" >> feeds.conf.default
+
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    # ================================================================
+    # Step 6b: Patch feeds 中的已知 Bug
+    #
+    # 经验教训:
+    #   A. Rust download-ci-llvm=true 会 404 → 改为 false
+    #   B. OpenClash 通过 Kconfig select 拉入 shadowsocks-rust → sed 删除
+    #   C. libxcrypt ≤4.4.34 在 Perl 5.34+ 上 expand-selected-hashes 崩溃
+    #      → 升级到 4.4.36 + 注入 PKG_FORTIFY_SOURCE:=0
+    #   D. sbwml/packages_lang_golang 替换旧 Go 工具链 (解决 golang HOST 编译问题)
+    # ================================================================
+    - name: Patch feeds 已知 Bug
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      run: |
+        echo "=== Patch A: Rust download-ci-llvm ==="
+        RUST_MK="feeds/packages/lang/rust/Makefile"
+        if [ -f "$RUST_MK" ]; then
+          sed -i 's/download-ci-llvm=true/download-ci-llvm=false/g' "$RUST_MK"
+          grep "download-ci-llvm" "$RUST_MK" || true
+          echo "✓ Rust patched"
+        fi
+
+        echo "=== Patch B: OpenClash shadowsocks-rust ==="
+        OPENCLASH_MK="feeds/luci/applications/luci-app-openclash/Makefile"
+        if [ -f "$OPENCLASH_MK" ]; then
+          sed -i '/shadowsocks[-_]rust/Id' "$OPENCLASH_MK"
+          echo "✓ shadowsocks-rust dependency removed"
+        fi
+
+        echo "=== Patch C: libxcrypt 4.4.36 + FORTIFY ==="
+        LIBXCRYPT_MK="feeds/packages/libs/libxcrypt/Makefile"
+        if [ -f "$LIBXCRYPT_MK" ]; then
+          echo "  patch 前: $(grep '^PKG_VERSION' "$LIBXCRYPT_MK" || true)"
+          sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=4.4.36/' "$LIBXCRYPT_MK"
+          sed -i 's/^PKG_HASH:=.*/PKG_HASH:=e5e1f4caee0a01de2aee26e3138807d6d3ca2b8e67287966d1fefd65e1fd8943/' "$LIBXCRYPT_MK"
+          # PKG_FORTIFY_SOURCE:=0 防止 -Werror=format-nonliteral
+          if ! grep -q "^PKG_FORTIFY_SOURCE" "$LIBXCRYPT_MK"; then
+            sed -i '/^include.*package\.mk/i PKG_FORTIFY_SOURCE:=0' "$LIBXCRYPT_MK"
           fi
-
-          # ── 补丁 A：rust 禁用 download-ci-llvm ──────────────────
-          RUST_MK="$WORKSPACE/openwrt/feeds/packages/lang/rust/Makefile"
-          if [ -f "$RUST_MK" ]; then
-            echo "=== rust patch 前 ==="
-            grep "download-ci-llvm" "$RUST_MK" || echo "（未找到该行）"
-            sed -i 's/download-ci-llvm=true/download-ci-llvm=false/g' "$RUST_MK"
-            echo "=== rust patch 后 ==="
-            grep "download-ci-llvm" "$RUST_MK" || true
-          else
-            echo "WARNING: rust Makefile 未找到：$RUST_MK"
+          # 验证
+          PATCHED_VER=$(grep "^PKG_VERSION" "$LIBXCRYPT_MK" \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          if [ "$PATCHED_VER" != "4.4.36" ]; then
+            echo "ERROR: libxcrypt 升级失败（当前: $PATCHED_VER）"
+            exit 1
           fi
+          echo "  patch 后: $PATCHED_VER ✓"
+        fi
 
-          # ── 补丁 B：openclash 移除 shadowsocks-rust 依赖 ────────
-          OPENCLASH_MK="$WORKSPACE/openwrt/feeds/luci/applications/luci-app-openclash/Makefile"
-          if [ -f "$OPENCLASH_MK" ]; then
-            grep -n "shadowsocks[-_]rust" "$OPENCLASH_MK" \
-              || echo "（未找到，可能已不存在）"
-            sed -i '/shadowsocks[-_]rust/Id' "$OPENCLASH_MK"
-            echo "=== openclash patch 完成 ==="
-          else
-            echo "WARNING: openclash Makefile 未找到：$OPENCLASH_MK"
-          fi
+        echo "=== Patch D: sbwml golang ==="
+        rm -rf feeds/packages/lang/golang
+        git clone --depth=1 \
+          https://github.com/sbwml/packages_lang_golang \
+          feeds/packages/lang/golang
+        echo "✓ golang replaced with sbwml version"
 
-      # ──────────────────────────────────────────────────────────────
-      # 7a. 集成 OpenAppFilter (OAF)
-      #
-      #     来源：destan19/OpenAppFilter（支持抖音/王者荣耀等数百款 App）
-      #     注意：OAF Kconfig 存在自引用循环依赖 bug，
-      #     已在 seed-ac2.config 中显式声明所有子包 =y 强制选中。
-      # ──────────────────────────────────────────────────────────────
-      - name: Integrate OpenAppFilter (OAF)
-        run: |
-          git clone --depth=1 \
-            https://github.com/destan19/OpenAppFilter.git \
-            $WORKSPACE/openwrt/package/OpenAppFilter
-          echo "=== OAF 集成完成 ==="
-          ls $WORKSPACE/openwrt/package/OpenAppFilter/
+    # ================================================================
+    # Step 7: 修改默认 LAN IP
+    # ================================================================
+    - name: 修改默认 LAN IP
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      run: |
+        sed -i 's/192.168.1.1/192.168.88.1/g' \
+          package/base-files/files/bin/config_generate
+        grep "192.168.88.1" package/base-files/files/bin/config_generate \
+          && echo "✓ LAN IP → 192.168.88.1"
 
-          # appfilter symlink 修复：
-          # open-app-filter 嵌套在非标准父目录，扫描器无法注册，
-          # 编译报 "No rule to make target"。
-          # 修复：顶层 symlink 使扫描器直接找到该包。
-          ln -sfn $WORKSPACE/openwrt/package/OpenAppFilter/open-app-filter \
-                  $WORKSPACE/openwrt/package/open-app-filter
-          echo "=== appfilter symlink 创建完成 ==="
+    # ================================================================
+    # Step 7b: 修复 kernel vermagic (匹配官方 immortalwrt)
+    #
+    # 经验教训:
+    #   - 自编译固件的 kernel vermagic 与官方不同
+    #   - 导致 opkg 无法安装官方 kmod ipk
+    #   - 使用已确认的硬编码值最稳定
+    # ================================================================
+    - name: 修复 kernel vermagic
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      run: |
+        # 已从 downloads.immortalwrt.org 确认:
+        # kmods/6.6.86-1-f2c63d42896f12da2b55f2c2b626e7be/
+        VERMAGIC="f2c63d42896f12da2b55f2c2b626e7be"
+        echo "$VERMAGIC" > vermagic
+        echo "=== vermagic: $VERMAGIC ==="
 
-
-      # ──────────────────────────────────────────────────────────────
-      # 7c. 集成 QuickStart（快速配置向导）
-      #
-      #     quickstart 不在任何标准 feed 中，需独立 clone：
-      #       后端服务: linkease/nas-packages → package/quickstart
-      #       LuCI 前端: lq-wq/luci-app-quickstart → package/luci-app-quickstart
-      #     移除 luci-app-quickstart 对 luci-app-store 的强制依赖，
-      #     避免与 iStore feed 版本冲突。
-      # ──────────────────────────────────────────────────────────────
-      - name: Integrate QuickStart
-        run: |
-          cd $WORKSPACE/openwrt
-
-          git clone --depth=1 \
-            https://github.com/linkease/nas-packages.git \
-            /tmp/nas-packages
-          cp -r /tmp/nas-packages/network/services/quickstart \
-            package/quickstart
-
-          git clone --depth=1 \
-            https://github.com/lq-wq/luci-app-quickstart.git \
-            package/luci-app-quickstart
-
-          sed -i 's/ +luci-app-store//g' \
-            package/luci-app-quickstart/Makefile 2>/dev/null || true
-
-          echo "=== QuickStart 集成完成 ==="
-          ls package/quickstart package/luci-app-quickstart
-
-      # ──────────────────────────────────────────────────────────────
-      # 8. 源码级修改
-      #
-      #    8-A  默认 LAN IP：192.168.1.1 → 192.168.88.1
-      #
-      #    8-B  kernel vermagic 对齐官方（兼容官方 kmod ipk）
-      #         使用固定 vermagic 确保模块与内核一致
-      #         与官方不同，固件烧录后 opkg install kmod-xxx 会报
-      #         "kernel version mismatch"。
-      #         修复：硬编码官方 vermagic（已人工核实），patch
-      #         include/kernel-defaults.mk 跳过 MD5 计算直接复制。
-      # ──────────────────────────────────────────────────────────────
-      - name: Patch source - LAN IP and kernel vermagic
-        run: |
-          cd $WORKSPACE/openwrt
-
-          # ── 8-A：修改默认 LAN IP ──────────────────────────────────
-          sed -i 's/192.168.1.1/192.168.88.1/g' \
-            package/base-files/files/bin/config_generate
-          echo "=== LAN IP patch 后 ==="
-          grep "192\.168\." package/base-files/files/bin/config_generate
-
-          # ── 8-B：对齐官方 vermagic ────────────────────────────────
-          # 官方 immortalwrt 24.10.1 filogic vermagic（已人工核实）：
-          #   kmods/6.6.86-1-f2c63d42896f12da2b55f2c2b626e7be/
-          #   kernel  : 6.6.86
-          #   vermagic: f2c63d42896f12da2b55f2c2b626e7be
-          # 硬编码避免动态抓取的不稳定性（bash set -e + grep 无匹配陷阱）。
-          # 若升级到新版本，请同步更新此值。
-          VERMAGIC="f2c63d42896f12da2b55f2c2b626e7be"
-          echo "=== 写入 vermagic: $VERMAGIC ==="
-          echo "$VERMAGIC" > vermagic
-
-          # patch include/kernel-defaults.mk：
-          #   原始行：grep '=[ym]' ... | $(MKHASH) md5 > $(LINUX_DIR)/.vermagic
-          #   替换为：        cp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic
+        # Patch kernel-defaults.mk 使用固定 vermagic
+        if grep -q 'MKHASH.*md5.*\.vermagic' include/kernel-defaults.mk; then
           sed -i \
-            '/grep.*\[ym\].*\.config\.set.*MKHASH.*md5.*\.vermagic/c\\t\tcp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic' \
+            's|grep.*\.config\.set.*MKHASH.*md5.*\.vermagic|cp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic|' \
             include/kernel-defaults.mk
+          echo "✓ kernel-defaults.mk patched"
+        else
+          echo "⚠ kernel-defaults.mk 格式不匹配，跳过"
+        fi
 
-          echo "=== kernel-defaults.mk vermagic 相关行（patch 后）==="
-          grep -n "vermagic" include/kernel-defaults.mk
+    # ================================================================
+    # Step 8: 合并配置 & defconfig
+    #
+    # 经验教训:
+    #   - kmod-nft-fullcone 有 Kconfig 自引用 bug，必须显式 =y
+    #   - kmod-oaf 同上
+    #   - dnsmasq 与 dnsmasq-full 冲突，必须禁用基础版
+    # ================================================================
+    - name: 合并配置 & defconfig
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      env:
+        ENABLE_SFE: ${{ github.event.inputs.enable_sfe || 'true' }}
+      run: |
+        # 合并两层配置
+        cat $GITHUB_WORKSPACE/configs/mt7981-common.config > .config
+        cat $GITHUB_WORKSPACE/configs/seed-ac2.config >> .config
 
-      # ──────────────────────────────────────────────────────────────
-      # 9. 合并配置 & make defconfig
-      #
-      #    两层 cat 合并：
-      #      ① mt7981-common.config — MT7981B 平台通用（无 Wi-Fi）
-      #      ② seed-ac2.config      — SEED AC2 专属差异
-      # ──────────────────────────────────────────────────────────────
-      - name: Merge config & run defconfig
-        run: |
-          cd $WORKSPACE/openwrt
-          cat \
-            $GITHUB_WORKSPACE/source/configs/mt7981-common.config \
-            $GITHUB_WORKSPACE/source/configs/seed-ac2.config \
-            > .config
-          make defconfig
+        # SFE 配置追加
+        if [ "${ENABLE_SFE}" = "true" ]; then
+          cat >> .config << 'EOF'
+        CONFIG_PACKAGE_luci-app-turboacc_INCLUDE_SHORTCUT_FE_CM=y
+        CONFIG_PACKAGE_kmod-shortcut-fe=y
+        CONFIG_PACKAGE_kmod-shortcut-fe-cm=y
+        CONFIG_PACKAGE_kmod-fast-classifier=y
+        EOF
+        fi
 
-          echo "=== dnsmasq 相关行 ==="
-          grep -i "dnsmasq" .config | head -5
-          echo "=== PoE 相关行 ==="
-          grep -iE "poe|poemgr" .config | head -5 || echo "（未选中）"
-          echo "=== LAN IP 验证 ==="
-          grep "192\.168\." package/base-files/files/bin/config_generate | head -3
-          echo "=== vermagic 文件内容 ==="
-          cat vermagic 2>/dev/null || echo "（vermagic 文件未生成）"
+        make defconfig
 
-      # ──────────────────────────────────────────────────────────────
-      # 10. 下载所有源码包（并行 + 失败重试）
-      # ──────────────────────────────────────────────────────────────
-      - name: Download package sources
-        run: |
-          cd $WORKSPACE/openwrt
-          make download -j$(nproc)
-          make download -j$(nproc) || true
+        echo "=== 诊断: turboacc 相关 ==="
+        grep -iE "turboacc|fullcone|offload|bbr|shortcut|sfe" .config || echo "(none)"
+        echo "=== 诊断: dnsmasq ==="
+        grep -i "dnsmasq" .config | head -4 || echo "(none)"
 
-      # ──────────────────────────────────────────────────────────────
-      # 11. 编译固件
-      #     先并行编译；失败后以单线程 + 详细日志重试便于排查
-      # ──────────────────────────────────────────────────────────────
-      - name: Compile firmware
-        run: |
-          cd $WORKSPACE/openwrt
-          make -j$(nproc) || make -j1 V=s
+    # ================================================================
+    # Step 9: (可选) SSH 调试
+    # ================================================================
+    - name: SSH 调试
+      uses: P3TERX/ssh2actions@v1.0.0
+      if: github.event.inputs.enable_ssh == 'true'
 
-      # ──────────────────────────────────────────────────────────────
-      # 12. 收集固件产物
-      # ──────────────────────────────────────────────────────────────
-      - name: Collect firmware artifacts
-        run: |
-          mkdir -p /tmp/artifacts
-          find $WORKSPACE/openwrt/bin/targets -type f \
-            \( -name "*sysupgrade*.bin" \
-               -o -name "*factory*.bin" \
-               -o -name "*.manifest" \) \
-            -exec cp {} /tmp/artifacts/ \;
-          echo "=== Collected files ==="
-          ls -lh /tmp/artifacts/
+    # ================================================================
+    # Step 10: 下载源码包
+    # ================================================================
+    - name: 下载源码包
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      run: |
+        make download -j16
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
 
-      # ──────────────────────────────────────────────────────────────
-      # 13. 上传 GitHub Artifact（保留 30 天）
-      # ──────────────────────────────────────────────────────────────
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4.6.2
-        with:
-          name: beeconmini-seed-ac2-${{ github.run_number }}
-          path: /tmp/artifacts/
-          retention-days: 30
+    # ================================================================
+    # Step 11: 编译固件
+    # ================================================================
+    - name: 编译固件
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      run: |
+        echo "============================================"
+        echo "  开始编译 | CPU: $(nproc) cores"
+        echo "  $(date +'%Y-%m-%d %H:%M:%S')"
+        echo "============================================"
+        make -j$(nproc) || make -j1 V=s 2>&1 | tee build.log | tail -100
 
-      # ──────────────────────────────────────────────────────────────
-      # 14. 生成 Release Tag（格式：yyyymmdd + run_number）
-      # ──────────────────────────────────────────────────────────────
-      - name: Generate release tag
-        id: tag
-        run: |
-          echo "TAG=$(date +%Y%m%d)${{ github.run_number }}" >> $GITHUB_OUTPUT
+    # ================================================================
+    # Step 12: 整理固件
+    # ================================================================
+    - name: 整理固件文件
+      if: success()
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/firmware
+        cp -f bin/targets/mediatek/filogic/*seed-ac2* \
+              $GITHUB_WORKSPACE/firmware/ 2>/dev/null || true
+        cp -f bin/targets/mediatek/filogic/sha256sums \
+              $GITHUB_WORKSPACE/firmware/ 2>/dev/null || true
+        cp -f bin/targets/mediatek/filogic/config.buildinfo \
+              $GITHUB_WORKSPACE/firmware/ 2>/dev/null || true
+        echo "=== 编译产物 ==="
+        ls -lh $GITHUB_WORKSPACE/firmware/
 
-      # ──────────────────────────────────────────────────────────────
-      # 15. 发布 GitHub Release
-      # ──────────────────────────────────────────────────────────────
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2.3.2
-        if: success()
-        with:
-          tag_name: ${{ steps.tag.outputs.TAG }}
-          name: "BeeconMini SEED AC2 | ${{ steps.tag.outputs.TAG }}"
-          body: |
-            ## BeeconMini SEED AC2 自动构建固件
+    # ================================================================
+    # Step 13: 上传 Artifacts
+    # ================================================================
+    - name: 上传固件到 Artifacts
+      uses: actions/upload-artifact@v4.6.2
+      if: success()
+      with:
+        name: ImmortalWrt-TurboACC-SEED-AC2-${{ github.run_number }}
+        path: firmware/
+        retention-days: 30
 
-            **构建信息**
-            - Commit: ${{ github.sha }}
-            - Branch: 24.10.1
-            - 上游: BeeconMini/immortalwrt
+    # ================================================================
+    # Step 14: 创建 Release
+    # ================================================================
+    - name: 生成 Release Tag
+      id: tag
+      if: success()
+      run: |
+        echo "release_tag=SEED-AC2-$(date +"%Y%m%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "release_date=$(date +"%Y-%m-%d %H:%M")" >> $GITHUB_OUTPUT
 
-            **硬件规格**
-            | 项目 | 参数 |
-            |------|------|
-            | CPU | MT7981B (Filogic 820, Cortex-A53 ×2) |
-            | 交换芯片 | RTL8373（8×2.5G PoE+） |
-            | WAN PHY | RTL8221B（2.5G） |
-            | 存储 | 1G RAM + 64G eMMC |
-            | Wi-Fi | 无 |
-            | PoE 单口最大功率 | 30W |
+    - name: 创建 Release
+      uses: softprops/action-gh-release@v2.3.2
+      if: success()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        name: "SEED AC2 (${{ steps.tag.outputs.release_date }})"
+        body: |
+          ## ImmortalWrt + TurboACC 固件 (BeeconMini SEED AC2)
 
-            **固件包含功能**
-            - PoE 管理（RTL8238B，8 口 PoE+，realtek-poe + poemgr）
-            - OpenClash（透明代理）
-            - OAF 应用过滤（OpenAppFilter，支持抖音 / 王者荣耀等数百款 App）
-            - NLBW 实时带宽监控（nlbwmon）
-            - VLMCSD（KMS 激活服务器）
-            - ttyd（Web 终端）
-            - iStore 应用商店 + QuickStart 快速配置
-            - File Manager（Web 文件管理器）
-            - 定时重启
-            - TurboACC 网络加速（SFE 软件流量分载 + nft-fullcone 全锥型 NAT）
-            - eQoS 带宽控制 / UPnP
-            - dnsmasq-full（含 DNSSEC / ipset 支持）
-            - 默认 LAN IP：192.168.88.1
-            - kernel vermagic 对齐官方，可直接 opkg 安装官方 kmod-*.ipk
-
-            **刷机说明**
-            - `*sysupgrade*` — 从 OpenWrt/ImmortalWrt 在线升级
-            - `*factory*` — 从原厂固件首次刷入
-          files: |
-            ${{ env.WORKSPACE }}/openwrt/bin/targets/*/*/*.bin
-            ${{ env.WORKSPACE }}/openwrt/bin/targets/*/*/*.manifest
-          make_latest: true
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          - **源码**: BeeconMini/immortalwrt (Commit: ${{ env.REPO_COMMIT }})
+          - **版本**: ImmortalWrt 24.10.1 | 内核 6.6
+          - **设备**: BeeconMini SEED AC2 (MT7981B, 无 Wi-Fi, 9口 2.5G PoE)
+          - **TurboACC**: Flow Offload + Fullcone NAT + BBR
+          - **SFE**: ${{ github.event.inputs.enable_sfe || 'true' }}
+          - **默认 IP**: 192.168.88.1 | 用户名: root | 密码: 无
+        files: firmware/*
