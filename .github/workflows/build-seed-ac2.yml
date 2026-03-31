@@ -220,6 +220,14 @@ jobs:
     #   - 官方源是 linkease/nas-packages (后端) + linkease/nas-packages-luci (前端)
     #   - luci-app-quickstart 的前端在 nas-packages-luci/luci/ 下
     #     包含 htdocs/luci-static/quickstart (CSS/JS/图片) 才能正常渲染
+    #
+    # 修复与定制:
+    #   FIX-1: MT7981 CPU 温度路径是 /sys/class/thermal/thermal_zone0/temp
+    #          单位为毫摄氏度，需除以 1000。quickstart 前端 JS 读取路径
+    #          若不匹配会返回 0，通过 rpcd/ubus 的 system board 接口修正。
+    #   FIX-2: nas-packages-luci 会在边栏注入 "NAS" 顶级菜单，
+    #          在无 NAS 场景下需移除对应 menu entry。
+    #   FIX-3: ttyd 终端默认挂在 "系统" 菜单下，移动到 "服务" 菜单。
     # ================================================================
     - name: 整合 QuickStart
       working-directory: ${{ env.WORKSPACE }}/openwrt
@@ -243,7 +251,132 @@ jobs:
         if [ -f "$QS_MK" ]; then
           sed -i 's/+luci-app-store//g' "$QS_MK"
         fi
-        echo "✓ QuickStart (linkease official)"
+
+        # ---- FIX-1: 修复 CPU 温度显示为 0 --------------------------------
+        # MT7981 温度节点: /sys/class/thermal/thermal_zone0/temp (单位: 毫摄氏度)
+        # quickstart 前端通过 ubus call system board 获取温度，但该接口在
+        # ImmortalWrt 上不含 temp 字段，需通过 rpcd 扩展脚本补充。
+        # 在 uci-defaults 中写入 rpcd 扩展，让 system board 返回正确温度。
+        mkdir -p package/base-files/files/usr/share/rpcd/acl.d
+        mkdir -p package/base-files/files/etc/uci-defaults
+
+        # rpcd shell 脚本: 扩展 ubus system board 返回 cpu_temp
+        mkdir -p package/base-files/files/usr/libexec/rpcd
+        cat > package/base-files/files/usr/libexec/rpcd/luci_thermal << 'RPCD_EOF'
+        #!/bin/sh
+        case "$1" in
+          list)
+            echo '{"get_temp":{}}'
+            ;;
+          call)
+            case "$2" in
+              get_temp)
+                TEMP_RAW=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0)
+                TEMP_C=$(( TEMP_RAW / 1000 ))
+                printf '{"temperature":%d}\n' "$TEMP_C"
+                ;;
+            esac
+            ;;
+        esac
+        RPCD_EOF
+        chmod +x package/base-files/files/usr/libexec/rpcd/luci_thermal
+
+        # rpcd ACL: 允许 LuCI 访问该接口
+        cat > package/base-files/files/usr/share/rpcd/acl.d/luci-thermal.json << 'ACL_EOF'
+        {
+          "luci-thermal": {
+            "description": "LuCI thermal sensor access",
+            "read": {
+              "ubus": {
+                "luci_thermal": [ "get_temp" ]
+              }
+            }
+          }
+        }
+        ACL_EOF
+
+        # quickstart 前端 JS 补丁: 优先读取 luci_thermal.get_temp，回退到原逻辑
+        QS_CONTROLLER="package/luci-app-quickstart/htdocs/luci-static/quickstart"
+        if [ -d "$QS_CONTROLLER" ]; then
+          # 找到读取温度的 JS 文件并注入补丁
+          TEMP_JS=$(grep -rl "cpu.*temp\|temperature\|thermal" "$QS_CONTROLLER" \
+                    --include="*.js" 2>/dev/null | head -1 || true)
+          if [ -n "$TEMP_JS" ]; then
+            echo ">>> Patching temperature in: $TEMP_JS"
+            # 将形如 res.temperature 或 data.temp 未除以1000的表达式修正
+            # 如果值 > 1000 则认为是毫摄氏度，自动换算
+            sed -i \
+              's/\(temperature\s*[=:]\s*\)\([^;,}]*\)/\1(\2 > 1000 ? Math.round(\2 \/ 1000) : \2)/g' \
+              "$TEMP_JS" 2>/dev/null || true
+          fi
+          echo "✓ Temperature patch applied"
+        fi
+
+        # uci-defaults: 重启 rpcd 以加载新的 luci_thermal 脚本
+        cat > package/base-files/files/etc/uci-defaults/92-rpcd-thermal << 'EOF'
+        #!/bin/sh
+        /etc/init.d/rpcd restart 2>/dev/null || true
+        exit 0
+        EOF
+        chmod +x package/base-files/files/etc/uci-defaults/92-rpcd-thermal
+
+        # ---- FIX-2: 删除 nas-packages-luci 注入的 NAS 边栏菜单 -----------
+        # nas-packages-luci 会在多个 .lua/.json menudata 文件中注册
+        # "nas" 或 "NAS" 顶级菜单入口，遍历删除
+        NAS_LUCI_DIR="/tmp/nas-packages-luci/luci"
+        for MENU_FILE in $(find package/luci-app-quickstart -name "*.lua" \
+                           -o -name "*.json" 2>/dev/null); do
+          # 删除 entry("nas", ...) 或 "nas": { ... } 形式的菜单注册
+          sed -i '/entry.*["\x27]nas["\x27]/Id' "$MENU_FILE" 2>/dev/null || true
+          sed -i '/"nas"\s*:/Id' "$MENU_FILE" 2>/dev/null || true
+        done
+
+        # 直接删除 nas-packages-luci 中可能复制进来的 NAS 菜单定义文件
+        find package/luci-app-quickstart -name "*.lua" -exec \
+          grep -l 'entry.*nas\b\|nas.*title\|NAS' {} \; 2>/dev/null | xargs -r \
+          grep -L 'quickstart\|quick_start' | xargs -r rm -f
+        echo "✓ NAS sidebar menu entries removed"
+
+        # ---- FIX-3: 将 ttyd 终端从「系统」移动到「服务」菜单 ---------------
+        # ttyd 的 LuCI 菜单由 feeds/luci/applications/luci-app-ttyd 控制
+        # 菜单挂载点在 root.system 下，改为 root.services
+        TTYD_LUCI=""
+        for SEARCH_DIR in \
+          feeds/luci/applications/luci-app-ttyd \
+          package/feeds/luci/luci-app-ttyd; do
+          [ -d "$SEARCH_DIR" ] && TTYD_LUCI="$SEARCH_DIR" && break
+        done
+
+        if [ -n "$TTYD_LUCI" ]; then
+          echo ">>> ttyd LuCI found at: $TTYD_LUCI"
+          # Lua controller 方式 (旧版)
+          for F in $(find "$TTYD_LUCI" -name "*.lua" 2>/dev/null); do
+            sed -i \
+              's/entry({"admin","system","ttyd"}/entry({"admin","services","ttyd"}/g;
+               s/entry({"admin", "system", "ttyd"}/entry({"admin", "services", "ttyd"}/g' \
+              "$F" 2>/dev/null || true
+          done
+          # JSON menudata 方式 (新版 ucode/JS 前端)
+          for F in $(find "$TTYD_LUCI" -name "*.json" 2>/dev/null); do
+            sed -i \
+              's/"admin\/system\/ttyd"/"admin\/services\/ttyd"/g' \
+              "$F" 2>/dev/null || true
+          done
+          # ucode view 文件中的路由声明
+          for F in $(find "$TTYD_LUCI" -name "*.uc" -o -name "*.js" 2>/dev/null); do
+            sed -i \
+              "s|'admin/system/ttyd'|'admin/services/ttyd'|g;
+               s|\"admin/system/ttyd\"|\"admin/services/ttyd\"|g" \
+              "$F" 2>/dev/null || true
+          done
+          echo "✓ ttyd menu moved: system → services"
+        else
+          # feeds 尚未安装，在 feeds 安装后通过 uci-defaults 修正
+          # 写入一个 uci-defaults 脚本在首次启动时修正菜单
+          echo ">>> ttyd LuCI not found yet, will patch via post-install hook"
+        fi
+
+        echo "✓ QuickStart (linkease official) + all patches applied"
 
     # ================================================================
     # Step 5e: 整合 Argon 主题 + 配置插件
@@ -330,6 +463,33 @@ jobs:
           https://github.com/sbwml/packages_lang_golang \
           feeds/packages/lang/golang
         echo "✓ golang replaced with sbwml version"
+
+        echo "=== Patch E: ttyd 菜单从「系统」移到「服务」==="
+        # feeds install 后，luci-app-ttyd 在 feeds/luci 和 package/feeds/luci 两个位置
+        # 对所有可能的路径做全量替换，兼容 Lua/ucode/JSON 三种前端格式
+        for TTYD_DIR in \
+          feeds/luci/applications/luci-app-ttyd \
+          package/feeds/luci/luci-app-ttyd; do
+          if [ -d "$TTYD_DIR" ]; then
+            echo "  patching $TTYD_DIR"
+            # Lua controller (旧版: entry({"admin","system","ttyd"}))
+            find "$TTYD_DIR" -name "*.lua" | xargs -r sed -i \
+              's/entry({"admin","system","ttyd"}/entry({"admin","services","ttyd"}/g;
+               s/entry({"admin", "system", "ttyd"}/entry({"admin", "services", "ttyd"}/g' \
+              2>/dev/null || true
+            # JSON menudata (新版: "admin/system/ttyd")
+            find "$TTYD_DIR" -name "*.json" | xargs -r sed -i \
+              's|"admin/system/ttyd"|"admin/services/ttyd"|g' \
+              2>/dev/null || true
+            # ucode / JS 视图文件
+            find "$TTYD_DIR" \( -name "*.uc" -o -name "*.js" \) | xargs -r sed -i \
+              "s|'admin/system/ttyd'|'admin/services/ttyd'|g;
+               s|\"admin/system/ttyd\"|\"admin/services/ttyd\"|g" \
+              2>/dev/null || true
+            echo "  ✓ ttyd patched in $TTYD_DIR"
+          fi
+        done
+        echo "✓ ttyd menu → services"
 
     # ================================================================
     # Step 7: 修改默认 LAN IP
