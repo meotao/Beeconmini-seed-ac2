@@ -110,14 +110,8 @@ jobs:
         fi
 
     # ================================================================
-    # Step 5: 整合 TurboACC (使用官方 add_turboacc.sh)
-    #
-    # 经验教训:
-    #   - 绝对不要手动拆解 turboacc 仓库结构，直接调用官方脚本
-    #   - turboacc package 分支使用版本化子目录 (firewall4-<VER>/firewall4/)
-    #   - add_turboacc.sh 会自动处理版本匹配和路径
-    #   - add_turboacc.sh 向 config-6.6 写入的是 "is not set" (禁用)
-    #     必须在脚本运行后手动改为 =y
+    # Step 5: 整合 TurboACC
+    # 注意: add_turboacc.sh 写入 config-6.6 的是 "is not set"，需手动改为 =y
     # ================================================================
     - name: 整合 TurboACC
       working-directory: ${{ env.WORKSPACE }}/openwrt
@@ -174,12 +168,7 @@ jobs:
         [ "${ENABLE_SFE}" = "true" ] && ls ./target/linux/generic/pending-6.6/613-* && echo "✓ patch 613"
 
     # ================================================================
-    # Step 5b: 处理 ImmortalWrt 自带 fullcone 冲突
-    #
-    # 经验教训:
-    #   - ImmortalWrt 自带 fullconenat-nft 包和 firewall4 fullcone 补丁
-    #   - add_turboacc.sh 已替换 firewall4/nftables/libnftnl
-    #   - 必须移除自带的 fullconenat-nft 避免编译冲突
+    # Step 5b: 移除 ImmortalWrt 自带 fullconenat-nft（与 turboacc 替换版冲突）
     # ================================================================
     - name: 处理 fullcone 包冲突
       working-directory: ${{ env.WORKSPACE }}/openwrt
@@ -195,10 +184,6 @@ jobs:
 
     # ================================================================
     # Step 5c: 整合 OpenAppFilter
-    #
-    # 经验教训:
-    #   - kmod-oaf 有 Kconfig 自引用循环依赖 bug
-    #   - open-app-filter 目录嵌套在 OpenAppFilter/ 下，需要创建 symlink
     # ================================================================
     - name: 整合 OpenAppFilter
       working-directory: ${{ env.WORKSPACE }}/openwrt
@@ -213,83 +198,27 @@ jobs:
 
     # ================================================================
     # Step 5d: 整合 QuickStart
-    #
-    # 经验教训:
-    #   - lq-wq/luci-app-quickstart 是第三方 fork，缺少前端静态资源
-    #     导致 LuCI 页面一片空白
-    #   - 官方源是 linkease/nas-packages (后端) + linkease/nas-packages-luci (前端)
-    #   - luci-app-quickstart 的前端在 nas-packages-luci/luci/ 下
-    #     包含 htdocs/luci-static/quickstart (CSS/JS/图片) 才能正常渲染
-    #
-    # 修复与定制:
-    #   FIX-2: nas-packages-luci 会在边栏注入 "NAS" 顶级菜单，
-    #          在无 NAS 场景下需移除对应 menu entry。
-    #   FIX-3: ttyd 终端默认挂在 "系统" 菜单下，移动到 "服务" 菜单。
-    #          实际 patch 在 Step 6b Patch E（feeds 安装后）执行。
+    # 注意: 必须用 linkease 官方源，第三方 fork 缺少前端静态资源
     # ================================================================
     - name: 整合 QuickStart
       working-directory: ${{ env.WORKSPACE }}/openwrt
       run: |
-        # 后端服务 (quickstart daemon)
-        git clone --depth=1 \
-          https://github.com/linkease/nas-packages.git \
-          /tmp/nas-packages
-        cp -r /tmp/nas-packages/network/services/quickstart \
-          package/quickstart
+        git clone --depth=1 https://github.com/linkease/nas-packages.git /tmp/nas-packages
+        cp -r /tmp/nas-packages/network/services/quickstart package/quickstart
 
-        # LuCI 前端 (官方 linkease 版本，含完整静态资源)
-        git clone --depth=1 \
-          https://github.com/linkease/nas-packages-luci.git \
-          /tmp/nas-packages-luci
-        cp -r /tmp/nas-packages-luci/luci/luci-app-quickstart \
-          package/luci-app-quickstart
+        git clone --depth=1 https://github.com/linkease/nas-packages-luci.git /tmp/nas-packages-luci
+        cp -r /tmp/nas-packages-luci/luci/luci-app-quickstart package/luci-app-quickstart
 
-        # 移除对 luci-app-store 的强制依赖 (避免与 iStore feed 冲突)
-        QS_MK="package/luci-app-quickstart/Makefile"
-        if [ -f "$QS_MK" ]; then
-          sed -i 's/+luci-app-store//g' "$QS_MK"
-        fi
+        # 移除对 luci-app-store 的强制依赖，避免与 iStore feed 冲突
+        sed -i 's/+luci-app-store//g' package/luci-app-quickstart/Makefile 2>/dev/null || true
 
-        # ---- FIX-2: 删除 nas-packages-luci 注入的 NAS 边栏菜单 -----------
-        # nas-packages-luci 会在多个 .lua/.json menudata 文件中注册
-        # "nas" 或 "NAS" 顶级菜单入口，遍历删除
-        NAS_LUCI_DIR="/tmp/nas-packages-luci/luci"
-        for MENU_FILE in $(find package/luci-app-quickstart -name "*.lua" \
-                           -o -name "*.json" 2>/dev/null); do
-          # 删除 entry("nas", ...) 或 "nas": { ... } 形式的菜单注册
-          sed -i '/entry.*["\x27]nas["\x27]/Id' "$MENU_FILE" 2>/dev/null || true
-          sed -i '/"nas"\s*:/Id' "$MENU_FILE" 2>/dev/null || true
-        done
-
-        # 直接删除 nas-packages-luci 中可能复制进来的 NAS 菜单定义文件
-        find package/luci-app-quickstart -name "*.lua" -exec \
-          grep -l 'entry.*nas\b\|nas.*title\|NAS' {} \; 2>/dev/null | xargs -r \
-          grep -L 'quickstart\|quick_start' | xargs -r rm -f
-        echo "✓ NAS sidebar menu entries removed"
-
-        # ---- FIX-3: ttyd 菜单移动在 Patch E (Step 6b) 中完成 ---------------
-        # feeds 在此时尚未安装，此处无需操作。
-        # 实际 patch 在 Step 6b Patch E 中通过 python3 精确修改
-        # menu.d/luci-app-ttyd.json 完成，见后续步骤。
-        echo ">>> ttyd menu patch deferred to Patch E (post-feeds-install)"
-
-        # ---- FIX-4: 隐藏首页「磁盘信息、存储服务、下载服务、远程域名」四个模块 ----
-        #
-        # index.js 是打包后的 bundle，不能用 sed 精确删除组件。
-        # 采用两层策略:
-        #   以 configs/quickstart-hide.css 作为独立补丁文件，
-        #   在 workflow 中直接 cat 追加到 style.css，彻底避免
-        #   heredoc 内 CSS 语法触发 YAML 解析错误的问题。
-
-        QS_CSS_DIR="package/luci-app-quickstart/htdocs/luci-static/quickstart"
-        QS_CSS="${QS_CSS_DIR}/style.css"
-        mkdir -p "$QS_CSS_DIR"
-
-        # 追加隐藏规则 (内容见 configs/quickstart-hide.css)
-        cat $GITHUB_WORKSPACE/configs/quickstart-hide.css >> "$QS_CSS"
-        echo "✓ QuickStart CSS hide rules appended ($(wc -l < $GITHUB_WORKSPACE/configs/quickstart-hide.css) lines)"
-
-        echo "✓ QuickStart (linkease official) + all patches applied"
+        # 删除 nas-packages-luci 在边栏注入的 NAS 顶级菜单
+        find package/luci-app-quickstart \( -name "*.lua" -o -name "*.json" \) 2>/dev/null | \
+          xargs -r sed -i '/entry.*nas/Id;/"nas"[[:space:]]*:/Id' 2>/dev/null || true
+        find package/luci-app-quickstart -name "*.lua" 2>/dev/null | \
+          xargs -r grep -l 'entry.*nas\|NAS' | \
+          xargs -r grep -L 'quickstart' | xargs -r rm -f
+        echo "✓ QuickStart integrated, NAS menu removed"
 
     # ================================================================
     # Step 5e: 整合 Argon 主题 + 配置插件
@@ -323,14 +252,7 @@ jobs:
         ./scripts/feeds install -a
 
     # ================================================================
-    # Step 6b: Patch feeds 中的已知 Bug
-    #
-    # 经验教训:
-    #   A. Rust download-ci-llvm=true 会 404 → 改为 false
-    #   B. OpenClash 通过 Kconfig select 拉入 shadowsocks-rust → sed 删除
-    #   C. libxcrypt ≤4.4.34 在 Perl 5.34+ 上 expand-selected-hashes 崩溃
-    #      → 升级到 4.4.36 + 注入 PKG_FORTIFY_SOURCE:=0
-    #   D. sbwml/packages_lang_golang 替换旧 Go 工具链 (解决 golang HOST 编译问题)
+    # Step 6b: Patch feeds 已知 Bug
     # ================================================================
     - name: Patch feeds 已知 Bug
       working-directory: ${{ env.WORKSPACE }}/openwrt
@@ -377,19 +299,9 @@ jobs:
           feeds/packages/lang/golang
         echo "✓ golang replaced with sbwml version"
 
-        echo "=== Patch E: ttyd 菜单从「系统」移到「服务」==="
-        # 根因: 之前的 sed 改坏了 JS bundle 语法导致 ttyd 菜单消失。
-        # 新方案: 用独立 Python 脚本 configs/patch-ttyd-menu.py 精确修改
-        #   1. menu.d/luci-app-ttyd.json 的 JSON key (LuCI 24.10+)
-        #   2. 旧版 Lua controller 中的 entry() 路径
-        #   完全不碰 .js/.uc bundle，避免改坏语法
-
-        for TTYD_DIR in \
-          feeds/luci/applications/luci-app-ttyd \
-          package/feeds/luci/luci-app-ttyd; do
-          if [ -d "$TTYD_DIR" ]; then
-            python3 $GITHUB_WORKSPACE/configs/patch-ttyd-menu.py "$TTYD_DIR"
-          fi
+        echo "=== Patch E: ttyd 菜单 system → services ==="
+        for TTYD_DIR in feeds/luci/applications/luci-app-ttyd package/feeds/luci/luci-app-ttyd; do
+          [ -d "$TTYD_DIR" ] && python3 $GITHUB_WORKSPACE/configs/patch-ttyd-menu.py "$TTYD_DIR"
         done
         echo "✓ ttyd menu → services"
 
@@ -437,12 +349,7 @@ jobs:
         echo "✓ uhttpd upload fix"
 
     # ================================================================
-    # Step 7b: 修复 kernel vermagic (匹配官方 immortalwrt)
-    #
-    # 经验教训:
-    #   - 自编译固件的 kernel vermagic 与官方不同
-    #   - 导致 opkg 无法安装官方 kmod ipk
-    #   - 使用已确认的硬编码值最稳定
+    # Step 7b: 修复 kernel vermagic（匹配官方，确保 opkg 安装 kmod 兼容）
     # ================================================================
     - name: 修复 kernel vermagic
       working-directory: ${{ env.WORKSPACE }}/openwrt
@@ -465,11 +372,6 @@ jobs:
 
     # ================================================================
     # Step 8: 合并配置 & defconfig
-    #
-    # 经验教训:
-    #   - kmod-nft-fullcone 有 Kconfig 自引用 bug，必须显式 =y
-    #   - kmod-oaf 同上
-    #   - dnsmasq 与 dnsmasq-full 冲突，必须禁用基础版
     # ================================================================
     - name: 合并配置 & defconfig
       working-directory: ${{ env.WORKSPACE }}/openwrt
