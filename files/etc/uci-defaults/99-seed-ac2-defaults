@@ -1,0 +1,81 @@
+#!/bin/sh
+# =============================================================================
+# BeeconMini SEED AC2 - generic first-boot defaults
+#
+# Goal:
+#   * LAN: 192.168.88.1/24
+#   * WAN: PPPoE, but without username/password
+#   * DHCP/RA: generic server configuration, no static leases
+#   * dnsmasq: remains on :53 and follows WAN/PPPoE resolver
+#   * OpenClash: preconfigured for AGH upstream use, but disabled at factory
+#   * AdGuard Home: enabled, Web UI :3008, DNS :1745, redirect disabled initially
+#
+# Final intended DNS topology after the user enables AGH redirect:
+#   LAN :53 -> AdGuard Home :1745 -> OpenClash :7874
+#                                \-> *.lan / PTR -> dnsmasq :53
+#
+# This script intentionally does NOT contain:
+#   * PPPoE credentials
+#   * static DHCP leases / client MAC addresses
+#   * OpenClash subscription or authentication credentials
+#   * device-specific firewall rules
+# =============================================================================
+TAG="seed-ac2-defaults"
+log()
+{
+    logger -t "$TAG" "$*"
+    echo "$TAG: $*"
+}
+sections_by_type()
+{
+    local pkg="$1"
+    local type="$2"
+    uci -q show "$pkg" 2>/dev/null | \
+        sed -n "s/^${pkg}\.\([^=]*\)=${type}$/\1/p"
+}
+find_section_by_option()
+{
+    local pkg="$1"
+    local type="$2"
+    local option="$3"
+    local value="$4"
+    local section
+    for section in $(sections_by_type "$pkg" "$type"); do
+        [ "$(uci -q get "${pkg}.${section}.${option}")" = "$value" ] && {
+            printf '%s\n' "$section"
+            return 0
+        }
+    done
+    return 1
+}
+# -----------------------------------------------------------------------------
+# 1. Network
+# -----------------------------------------------------------------------------
+log "configuring generic PPPoE network"
+uci -q set network.globals='globals'
+uci -q set network.globals.packet_steering='1'
+BRLAN="$(find_section_by_option network device name br-lan || true)"
+if [ -z "$BRLAN" ]; then
+    uci -q set network.seed_br_lan='device'
+    BRLAN='seed_br_lan'
+fi
+uci -q set "network.${BRLAN}.name=br-lan"
+uci -q set "network.${BRLAN}.type=bridge"
+uci -q delete "network.${BRLAN}.ports"
+uci -q add_list "network.${BRLAN}.ports=eth0"
+uci -q set network.lan='interface'
+uci -q set network.lan.device='br-lan'
+uci -q set network.lan.proto='static'
+uci -q set network.lan.ipaddr='192.168.88.1'
+uci -q set network.lan.netmask='255.255.255.0'
+uci -q set network.lan.ip6assign='64'
+uci -q set network.lan.ip6ifaceid='eui64'
+uci -q set network.wan='interface'
+uci -q set network.wan.device='eth1'
+uci -q set network.wan.proto='pppoe'
+uci -q set network.wan.ipv6='auto'
+uci -q set network.wan.peerdns='1'
+# Never bake PPPoE credentials into the generic firmware.
+uci -q delete network.wan.username
+uci -q delete network.wan.password
+uci -q commit network
