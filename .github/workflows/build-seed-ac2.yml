@@ -1,426 +1,42 @@
-#=====================================================================
-# Build ImmortalWrt 24.10.1 + TurboACC (SFE) for BeeconMini SEED AC2
-# 目标: mediatek/filogic (mt7981b) | 内核: 6.6
-# 源码: BeeconMini/immortalwrt  Commit: 9d076a1
-#
-# 本 workflow 吸取了大量实际编译调试经验（详见 README.md）
-#=====================================================================
-
-name: Build BeeconMini SEED AC2
-on:
-  workflow_dispatch:
-    inputs:
-      enable_sfe:
-        description: '启用 Shortcut-FE'
-        required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-      enable_ssh:
-        description: '启用 SSH 调试 (tmate)'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
-
-env:
-  REPO_URL: https://github.com/BeeconMini/immortalwrt
-  REPO_BRANCH: main
-  REPO_COMMIT: 9d076a1
-  TZ: Asia/Shanghai
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # 工作目录
-  WORKSPACE: /workdir
-
-jobs:
-  build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 360
-
-    steps:
-    # ================================================================
-    # Step 1: 释放磁盘空间
-    # ================================================================
-    - name: 释放磁盘空间
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: true
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        docker-images: true
-        swap-storage: true
-
-    # ================================================================
-    # Step 2: 检出本仓库
-    # ================================================================
-    - name: 检出本仓库
-      uses: actions/checkout@v4.2.2
-
-    # ================================================================
-    # Step 3: 初始化编译环境
-    # 经验教训:
-    #   - 必须包含 bison (内核编译)
-    #   - 必须包含 libelf-dev (内核模块编译)
-    #   - 必须包含 python3-distutils (prereq-build.mk 检测)
-    #   - 必须包含 perl-modules-5.34 (libxcrypt 兼容)
-    # ================================================================
-    - name: 初始化编译环境
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install -y \
-          ack antlr3 asciidoc autoconf automake autopoint binutils bison \
-          build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler \
-          ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev \
-          gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
-          libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
-          libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev \
-          libtool lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full \
-          patch pkgconf python3 python3-pip python3-ply python3-docutils \
-          python3-pyelftools python3-distutils python3-setuptools \
-          qemu-utils re2c rsync scons squashfs-tools subversion \
-          swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd \
-          perl-modules-5.34
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
-        sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p $WORKSPACE
-        sudo chown $USER:$GROUPS $WORKSPACE
-
-    # ================================================================
-    # Step 4: 克隆 ImmortalWrt 源码
-    # ================================================================
-    - name: 克隆 ImmortalWrt 源码
-      working-directory: ${{ env.WORKSPACE }}
-      run: |
-        df -hT $PWD
-        git clone $REPO_URL openwrt
-        cd openwrt
-        if [ -n "$REPO_COMMIT" ]; then
-          echo ">>> Checking out commit: $REPO_COMMIT"
-          git checkout $REPO_COMMIT
-        fi
-
-    # ================================================================
-    # Step 5: 整合 TurboACC
-    # 注意: add_turboacc.sh 写入 config-6.6 的是 "is not set"，需手动改为 =y
-    # ================================================================
-    - name: 整合 TurboACC
-      working-directory: ${{ env.WORKSPACE }}/openwrt
-      env:
-        ENABLE_SFE: ${{ github.event.inputs.enable_sfe || 'true' }}
-      run: |
-        echo "============================================"
-        echo "  整合 TurboACC | SFE: ${ENABLE_SFE}"
-        echo "============================================"
-
-        # 确保非交互式运行（预删除旧目录）
-        rm -rf ./package/turboacc
-
-        # 下载并执行官方脚本
-        curl -sSL https://raw.githubusercontent.com/chenmozhijin/turboacc/luci/add_turboacc.sh \
-          -o add_turboacc.sh
-        chmod +x add_turboacc.sh
-
-        if [ "${ENABLE_SFE}" = "true" ]; then
-          bash add_turboacc.sh
-        else
-          bash add_turboacc.sh --no-sfe
-        fi
-
-        # ---- 关键修复: add_turboacc.sh 写入的是 "is not set" ----
-        # 必须改为 =y，否则 patch 953 的 #ifdef CONFIG_SHORTCUT_FE 不生效
-        CFG="./target/linux/generic/config-6.6"
-
-        # CONFIG_NF_CONNTRACK_CHAIN_EVENTS
-        sed -i 's/^# CONFIG_NF_CONNTRACK_CHAIN_EVENTS is not set/CONFIG_NF_CONNTRACK_CHAIN_EVENTS=y/' "$CFG"
-        grep -q "^CONFIG_NF_CONNTRACK_CHAIN_EVENTS=y" "$CFG" \
-          || echo "CONFIG_NF_CONNTRACK_CHAIN_EVENTS=y" >> "$CFG"
-
-        # CONFIG_SHORTCUT_FE (仅 SFE 模式)
-        if [ "${ENABLE_SFE}" = "true" ]; then
-          sed -i 's/^# CONFIG_SHORTCUT_FE is not set/CONFIG_SHORTCUT_FE=y/' "$CFG"
-          grep -q "^CONFIG_SHORTCUT_FE=y" "$CFG" \
-            || echo "CONFIG_SHORTCUT_FE=y" >> "$CFG"
-        fi
-
-        # ---- 验证 ----
-        echo "=== config-6.6 关键配置 ==="
-        grep -E "CONNTRACK_CHAIN|SHORTCUT_FE" "$CFG" || echo "(none)"
-
-        echo "=== 验证文件就位 ==="
-        ls ./package/turboacc/luci-app-turboacc/Makefile && echo "✓ luci-app-turboacc"
-        ls ./package/turboacc/nft-fullcone/Makefile && echo "✓ nft-fullcone"
-        [ "${ENABLE_SFE}" = "true" ] && ls ./package/turboacc/shortcut-fe/ && echo "✓ shortcut-fe"
-        ls ./package/network/config/firewall4/Makefile && echo "✓ firewall4 (replaced)"
-        ls ./package/network/utils/nftables/Makefile && echo "✓ nftables (replaced)"
-        ls ./package/libs/libnftnl/Makefile && echo "✓ libnftnl (replaced)"
-        ls ./target/linux/generic/hack-6.6/952-* && echo "✓ patch 952"
-        [ "${ENABLE_SFE}" = "true" ] && ls ./target/linux/generic/hack-6.6/953-* && echo "✓ patch 953"
-        [ "${ENABLE_SFE}" = "true" ] && ls ./target/linux/generic/pending-6.6/613-* && echo "✓ patch 613"
-
-    # ================================================================
-    # Step 5b: 移除 ImmortalWrt 自带 fullconenat-nft（与 turboacc 替换版冲突）
-    # ================================================================
-    - name: 处理 fullcone 包冲突
-      working-directory: ${{ env.WORKSPACE }}/openwrt
-      run: |
-        [ -d "./package/network/utils/fullconenat-nft" ] && {
-          echo ">>> 移除 ImmortalWrt 自带的 fullconenat-nft"
-          rm -rf ./package/network/utils/fullconenat-nft
         }
 
-        [ -d "./package/network/utils/fullconenat" ] && {
-          echo ">>> 移除 fullconenat (iptables 版本)"
-          rm -rf ./package/network/utils/fullconenat
-        }
+        # ---- 复制到 OpenWrt rootfs overlay ----
+        mkdir -p files
+        cp -a "$GITHUB_WORKSPACE/files/." files/
 
-    # ================================================================
-    # Step 5c: 整合 OpenAppFilter
-    # ================================================================
-    - name: 整合 OpenAppFilter
-      working-directory: ${{ env.WORKSPACE }}/openwrt
-      run: |
-        git clone --depth=1 \
-          https://github.com/destan19/OpenAppFilter.git \
-          package/OpenAppFilter
+        # ---- 权限 ----
+        chmod 600 files/etc/AdGuardHome.yaml
+        chmod 755 files/etc/uci-defaults/99-seed-ac2-defaults
 
-        # 修复: open-app-filter 在非标准父目录下，需要 symlink
-        ln -sf OpenAppFilter/open-app-filter package/open-app-filter
-
-        echo "✓ OpenAppFilter + symlink"
-
-    # ================================================================
-    # Step 5d: 整合 QuickStart
-    # 注意: 必须用 linkease 官方源，第三方 fork 缺少前端静态资源
-    # ================================================================
-    - name: 整合 QuickStart
-      working-directory: ${{ env.WORKSPACE }}/openwrt
-      run: |
-        git clone --depth=1 https://github.com/linkease/nas-packages.git /tmp/nas-packages
-        cp -r /tmp/nas-packages/network/services/quickstart package/quickstart
-
-        git clone --depth=1 https://github.com/linkease/nas-packages-luci.git /tmp/nas-packages-luci
-        cp -r /tmp/nas-packages-luci/luci/luci-app-quickstart package/luci-app-quickstart
-
-        # 移除对 luci-app-store 的强制依赖，避免与 iStore feed 冲突
-        sed -i 's/+luci-app-store//g' package/luci-app-quickstart/Makefile 2>/dev/null || true
-
-        # 删除 nas-packages-luci 在边栏注入的 NAS 顶级菜单
-        find package/luci-app-quickstart \( -name "*.lua" -o -name "*.json" \) 2>/dev/null | \
-          xargs -r sed -i '/entry.*nas/Id;/"nas"[[:space:]]*:/Id' 2>/dev/null || true
-
-        find package/luci-app-quickstart -name "*.lua" 2>/dev/null | \
-          xargs -r grep -l 'entry.*nas\|NAS' | \
-          xargs -r grep -L 'quickstart' | xargs -r rm -f
-
-        echo "✓ QuickStart integrated, NAS menu removed"
-
-    # ================================================================
-    # Step 5e: 整合 Argon 主题 + 配置插件
-    # ================================================================
-    - name: 整合 Argon 主题
-      working-directory: ${{ env.WORKSPACE }}/openwrt
-      run: |
-        # Argon 主题 (master 分支适用于 Official OpenWrt / ImmortalWrt)
-        git clone --depth=1 \
-          https://github.com/jerrykuku/luci-theme-argon.git \
-          package/luci-theme-argon
-
-        # Argon 主题配置插件 (自定义登录背景/颜色等)
-        git clone --depth=1 \
-          https://github.com/jerrykuku/luci-app-argon-config.git \
-          package/luci-app-argon-config
-
-        echo "✓ Argon theme + config plugin"
-
-    # ================================================================
-    # Step 5f: 整合 AdGuard Home LuCI
-    # 来源: https://github.com/stevenjoezhang/luci-app-adguardhome
-    # ================================================================
-    - name: 整合 AdGuard Home LuCI
-      working-directory: ${{ env.WORKSPACE }}/openwrt
-      run: |
-        echo "============================================"
-        echo "  整合 luci-app-adguardhome"
-        echo "============================================"
-
-        rm -rf package/luci-app-adguardhome
-
-        git clone --depth=1 --branch dev \
-          https://github.com/stevenjoezhang/luci-app-adguardhome.git \
-          package/luci-app-adguardhome
-
-        # 验证包结构，避免上游仓库异常时继续编译
-        test -f package/luci-app-adguardhome/Makefile || {
-          echo "ERROR: luci-app-adguardhome Makefile 不存在"
-          exit 1
-        }
-
-        grep -q '^PKG_NAME:=luci-app-adguardhome$' \
-          package/luci-app-adguardhome/Makefile || {
-            echo "ERROR: luci-app-adguardhome Makefile 包名异常"
+        # ---- 基本验证 ----
+        grep -q 'address: 0.0.0.0:3008' \
+          files/etc/AdGuardHome.yaml || {
+            echo "ERROR: AdGuard Home HTTP 配置异常"
             exit 1
           }
 
-        echo "=== luci-app-adguardhome 信息 ==="
-        grep -E '^PKG_(NAME|VERSION):=' \
-          package/luci-app-adguardhome/Makefile || true
-
-        echo "✓ luci-app-adguardhome integrated"
-
-    # ================================================================
-    # Step 6: 更新 & 安装 feeds
-    # ================================================================
-    - name: 更新 feeds
-      working-directory: ${{ env.WORKSPACE }}/openwrt
-      run: |
-        # 追加 iStore feed (固定 main 分支)
-        grep -q "istore" feeds.conf.default || \
-          echo "src-git istore https://github.com/linkease/istore.git;main" >> feeds.conf.default
-
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-
-    # ================================================================
-    # Step 6b: Patch feeds 已知 Bug
-    # ================================================================
-    - name: Patch feeds 已知 Bug
-      working-directory: ${{ env.WORKSPACE }}/openwrt
-      run: |
-        echo "=== Patch A: Rust download-ci-llvm ==="
-        RUST_MK="feeds/packages/lang/rust/Makefile"
-        if [ -f "$RUST_MK" ]; then
-          sed -i 's/download-ci-llvm=true/download-ci-llvm=false/g' "$RUST_MK"
-          grep "download-ci-llvm" "$RUST_MK" || true
-          echo "✓ Rust patched"
-        fi
-
-        echo "=== Patch B: OpenClash shadowsocks-rust ==="
-        OPENCLASH_MK="feeds/luci/applications/luci-app-openclash/Makefile"
-        if [ -f "$OPENCLASH_MK" ]; then
-          sed -i '/shadowsocks[-_]rust/Id' "$OPENCLASH_MK"
-          echo "✓ shadowsocks-rust dependency removed"
-        fi
-
-        echo "=== Patch C: libxcrypt 4.4.36 + FORTIFY ==="
-        LIBXCRYPT_MK="feeds/packages/libs/libxcrypt/Makefile"
-        if [ -f "$LIBXCRYPT_MK" ]; then
-          echo "  patch 前: $(grep '^PKG_VERSION' "$LIBXCRYPT_MK" || true)"
-
-          sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=4.4.36/' "$LIBXCRYPT_MK"
-          sed -i 's/^PKG_HASH:=.*/PKG_HASH:=e5e1f4caee0a01de2aee26e3138807d6d3ca2b8e67287966d1fefd65e1fd8943/' "$LIBXCRYPT_MK"
-
-          # PKG_FORTIFY_SOURCE:=0 防止 -Werror=format-nonliteral
-          if ! grep -q "^PKG_FORTIFY_SOURCE" "$LIBXCRYPT_MK"; then
-            sed -i '/^include.*package\.mk/i PKG_FORTIFY_SOURCE:=0' "$LIBXCRYPT_MK"
-          fi
-
-          # 验证
-          PATCHED_VER=$(grep "^PKG_VERSION" "$LIBXCRYPT_MK" \
-            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-
-          if [ "$PATCHED_VER" != "4.4.36" ]; then
-            echo "ERROR: libxcrypt 升级失败（当前: $PATCHED_VER）"
+        grep -q '127.0.0.1:7874' \
+          files/etc/AdGuardHome.yaml || {
+            echo "ERROR: AdGuard Home → OpenClash DNS upstream 缺失"
             exit 1
-          fi
+          }
 
-          echo "  patch 后: $PATCHED_VER ✓"
-        fi
+        grep -q "openclash.config.dns_port='7874'" \
+          files/etc/uci-defaults/99-seed-ac2-defaults || {
+            echo "ERROR: OpenClash DNS 端口预置缺失"
+            exit 1
+          }
 
-        echo "=== Patch D: sbwml golang ==="
-        rm -rf feeds/packages/lang/golang
-        git clone --depth=1 \
-          https://github.com/sbwml/packages_lang_golang \
-          feeds/packages/lang/golang
+        grep -q "AdGuardHome.AdGuardHome.redirect='none'" \
+          files/etc/uci-defaults/99-seed-ac2-defaults || {
+            echo "ERROR: AdGuard Home 出厂 DNS redirect 状态异常"
+            exit 1
+          }
 
-        echo "✓ golang replaced with sbwml version"
+        echo "=== RootFS overlay ==="
+        find files -maxdepth 4 -type f -print
 
-        echo "=== Patch E: ttyd 菜单 system → services ==="
-        for TTYD_DIR in feeds/luci/applications/luci-app-ttyd package/feeds/luci/luci-app-ttyd; do
-          [ -d "$TTYD_DIR" ] && python3 $GITHUB_WORKSPACE/configs/patch-ttyd-menu.py "$TTYD_DIR"
-        done
-
-        echo "✓ ttyd menu → services"
-
-    # ================================================================
-    # Step 7: 修改默认 LAN IP
-    # ================================================================
-    - name: 修改默认 LAN IP
-      working-directory: ${{ env.WORKSPACE }}/openwrt
-      run: |
-        sed -i 's/192.168.1.1/192.168.88.1/g' \
-          package/base-files/files/bin/config_generate
-
-        grep "192.168.88.1" package/base-files/files/bin/config_generate \
-          && echo "✓ LAN IP → 192.168.88.1"
-
-    # ================================================================
-    # Step 7a: 设置 Argon 为默认主题
-    # ================================================================
-    - name: 设置 Argon 为默认主题
-      working-directory: ${{ env.WORKSPACE }}/openwrt
-      run: |
-        # 写入 uci-defaults 脚本，固件首次启动时自动执行
-        mkdir -p package/base-files/files/etc/uci-defaults
-
-        cat > package/base-files/files/etc/uci-defaults/90-default-theme << 'EOF'
-        #!/bin/sh
-        uci set luci.main.mediaurlbase='/luci-static/argon'
-        uci commit luci
-        exit 0
-        EOF
-
-        chmod +x package/base-files/files/etc/uci-defaults/90-default-theme
-
-        echo "✓ Default theme → argon"
-
-        # 修复 LuCI 上传 ipk 时 "XHR request aborted by browser" 错误
-        # 原因: uhttpd 默认 POST 体积和 CGI 超时过小，大 ipk 上传/安装时被截断
-        cat > package/base-files/files/etc/uci-defaults/91-uhttpd-upload-fix << 'UHEOF'
-        #!/bin/sh
-        uci set uhttpd.main.max_requests='32'
-        uci set uhttpd.main.script_timeout='300'
-        uci set uhttpd.main.network_timeout='120'
-        uci set uhttpd.main.tcp_keepalive='1'
-        uci commit uhttpd
-        /etc/init.d/uhttpd restart
-        exit 0
-        UHEOF
-
-        chmod +x package/base-files/files/etc/uci-defaults/91-uhttpd-upload-fix
-
-        echo "✓ uhttpd upload fix"
-
-    # ================================================================
-    # Step 7b: 修复 kernel vermagic（匹配官方，确保 opkg 安装 kmod 兼容）
-    # ================================================================
-    - name: 修复 kernel vermagic
-      working-directory: ${{ env.WORKSPACE }}/openwrt
-      run: |
-        # 已从 downloads.immortalwrt.org 确认:
-        # kmods/6.6.86-1-f2c63d42896f12da2b55f2c2b626e7be/
-        VERMAGIC="f2c63d42896f12da2b55f2c2b626e7be"
-
-        echo "$VERMAGIC" > vermagic
-        echo "=== vermagic: $VERMAGIC ==="
-
-        # Patch kernel-defaults.mk 使用固定 vermagic
-        if grep -q 'MKHASH.*md5.*\.vermagic' include/kernel-defaults.mk; then
-          sed -i \
-            's|grep.*\.config\.set.*MKHASH.*md5.*\.vermagic|cp $(TOPDIR)/vermagic $(LINUX_DIR)/.vermagic|' \
-            include/kernel-defaults.mk
-          echo "✓ kernel-defaults.mk patched"
-        else
-          echo "⚠ kernel-defaults.mk 格式不匹配，跳过"
-        fi
+        echo "✓ SEED AC2 通用预置配置已整合"
 
     # ================================================================
     # Step 8: 合并配置 & defconfig
@@ -447,7 +63,6 @@ jobs:
         make defconfig
 
         echo "=== 诊断: AdGuard Home ==="
-
         grep -q '^CONFIG_PACKAGE_luci-app-adguardhome=y$' .config || {
           echo "ERROR: luci-app-adguardhome 未进入最终 .config"
           exit 1
@@ -457,6 +72,27 @@ jobs:
           echo "WARNING: luci-app-adguardhome 中文语言包未启用"
 
         echo "✓ luci-app-adguardhome 已进入最终配置"
+
+        echo "=== 诊断: OpenClash ==="
+        grep -q '^CONFIG_PACKAGE_luci-app-openclash=y$' .config || {
+          echo "ERROR: luci-app-openclash 未进入最终 .config"
+          exit 1
+        }
+
+        echo "✓ luci-app-openclash 已进入最终配置"
+
+        echo "=== 诊断: RootFS 预置配置 ==="
+        test -f files/etc/AdGuardHome.yaml || {
+          echo "ERROR: AdGuardHome.yaml 未进入 rootfs overlay"
+          exit 1
+        }
+
+        test -x files/etc/uci-defaults/99-seed-ac2-defaults || {
+          echo "ERROR: 99-seed-ac2-defaults 不存在或不可执行"
+          exit 1
+        }
+
+        echo "✓ SEED AC2 预置配置已进入 rootfs overlay"
 
         echo "=== 诊断: turboacc 相关 ==="
         grep -iE "turboacc|fullcone|offload|bbr|shortcut|sfe" .config || echo "(none)"
