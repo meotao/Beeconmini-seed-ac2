@@ -20,19 +20,24 @@
 #   * OpenClash subscription or authentication credentials
 #   * device-specific firewall rules
 # =============================================================================
+
 TAG="seed-ac2-defaults"
+
 log()
 {
     logger -t "$TAG" "$*"
     echo "$TAG: $*"
 }
+
 sections_by_type()
 {
     local pkg="$1"
     local type="$2"
+
     uci -q show "$pkg" 2>/dev/null | \
         sed -n "s/^${pkg}\.\([^=]*\)=${type}$/\1/p"
 }
+
 find_section_by_option()
 {
     local pkg="$1"
@@ -40,29 +45,36 @@ find_section_by_option()
     local option="$3"
     local value="$4"
     local section
+
     for section in $(sections_by_type "$pkg" "$type"); do
         [ "$(uci -q get "${pkg}.${section}.${option}")" = "$value" ] && {
             printf '%s\n' "$section"
             return 0
         }
     done
+
     return 1
 }
+
 # -----------------------------------------------------------------------------
 # 1. Network
 # -----------------------------------------------------------------------------
 log "configuring generic PPPoE network"
+
 uci -q set network.globals='globals'
 uci -q set network.globals.packet_steering='1'
+
 BRLAN="$(find_section_by_option network device name br-lan || true)"
 if [ -z "$BRLAN" ]; then
     uci -q set network.seed_br_lan='device'
     BRLAN='seed_br_lan'
 fi
+
 uci -q set "network.${BRLAN}.name=br-lan"
 uci -q set "network.${BRLAN}.type=bridge"
 uci -q delete "network.${BRLAN}.ports"
 uci -q add_list "network.${BRLAN}.ports=eth0"
+
 uci -q set network.lan='interface'
 uci -q set network.lan.device='br-lan'
 uci -q set network.lan.proto='static'
@@ -70,12 +82,238 @@ uci -q set network.lan.ipaddr='192.168.88.1'
 uci -q set network.lan.netmask='255.255.255.0'
 uci -q set network.lan.ip6assign='64'
 uci -q set network.lan.ip6ifaceid='eui64'
+
 uci -q set network.wan='interface'
 uci -q set network.wan.device='eth1'
 uci -q set network.wan.proto='pppoe'
 uci -q set network.wan.ipv6='auto'
 uci -q set network.wan.peerdns='1'
+
 # Never bake PPPoE credentials into the generic firmware.
 uci -q delete network.wan.username
 uci -q delete network.wan.password
+
 uci -q commit network
+
+# -----------------------------------------------------------------------------
+# 2. DHCP / dnsmasq / IPv6 RA
+# -----------------------------------------------------------------------------
+log "configuring dnsmasq, DHCP and RA"
+
+DNSMASQ="$(sections_by_type dhcp dnsmasq | head -n 1)"
+if [ -z "$DNSMASQ" ]; then
+    uci -q set dhcp.seed_dnsmasq='dnsmasq'
+    DNSMASQ='seed_dnsmasq'
+fi
+
+uci -q set "dhcp.${DNSMASQ}.domainneeded=1"
+uci -q set "dhcp.${DNSMASQ}.localise_queries=1"
+uci -q set "dhcp.${DNSMASQ}.rebind_protection=1"
+uci -q set "dhcp.${DNSMASQ}.rebind_localhost=1"
+uci -q set "dhcp.${DNSMASQ}.local=/lan/"
+uci -q set "dhcp.${DNSMASQ}.domain=lan"
+uci -q set "dhcp.${DNSMASQ}.expandhosts=1"
+uci -q set "dhcp.${DNSMASQ}.authoritative=1"
+uci -q set "dhcp.${DNSMASQ}.readethers=1"
+uci -q set "dhcp.${DNSMASQ}.leasefile=/tmp/dhcp.leases"
+uci -q set "dhcp.${DNSMASQ}.localservice=1"
+uci -q set "dhcp.${DNSMASQ}.localuse=1"
+uci -q set "dhcp.${DNSMASQ}.ednspacket_max=1232"
+
+# Keep dnsmasq on :53 as the safe factory-state resolver.
+uci -q set "dhcp.${DNSMASQ}.port=53"
+uci -q set "dhcp.${DNSMASQ}.noresolv=0"
+uci -q set "dhcp.${DNSMASQ}.resolvfile=/tmp/resolv.conf.d/resolv.conf.auto"
+
+# Match the tested OpenClash/AGH DNS behavior.
+uci -q set "dhcp.${DNSMASQ}.cachesize=0"
+uci -q set "dhcp.${DNSMASQ}.nonegcache=1"
+
+uci -q set dhcp.lan='dhcp'
+uci -q set dhcp.lan.interface='lan'
+uci -q set dhcp.lan.start='10'
+uci -q set dhcp.lan.limit='90'
+uci -q set dhcp.lan.leasetime='12h'
+uci -q set dhcp.lan.dhcpv4='server'
+uci -q set dhcp.lan.ra='server'
+uci -q set dhcp.lan.max_preferred_lifetime='2700'
+uci -q set dhcp.lan.max_valid_lifetime='5400'
+uci -q set dhcp.lan.ra_default='1'
+uci -q delete dhcp.lan.ra_flags
+uci -q add_list dhcp.lan.ra_flags='none'
+
+# Do not advertise a separate IPv6 DNS server to LAN clients.
+uci -q set dhcp.lan.dns_service='0'
+
+uci -q set dhcp.wan='dhcp'
+uci -q set dhcp.wan.interface='wan'
+uci -q set dhcp.wan.ignore='1'
+
+uci -q commit dhcp
+
+# -----------------------------------------------------------------------------
+# 3. Firewall / TurboACC
+# -----------------------------------------------------------------------------
+log "configuring generic firewall acceleration defaults"
+
+FW_DEFAULTS="$(sections_by_type firewall defaults | head -n 1)"
+if [ -z "$FW_DEFAULTS" ]; then
+    uci -q set firewall.seed_defaults='defaults'
+    FW_DEFAULTS='seed_defaults'
+fi
+
+uci -q set "firewall.${FW_DEFAULTS}.fullcone=1"
+uci -q set "firewall.${FW_DEFAULTS}.flow_offloading=1"
+uci -q set "firewall.${FW_DEFAULTS}.flow_offloading_hw=1"
+
+WAN_ZONE="$(find_section_by_option firewall zone name wan || true)"
+if [ -n "$WAN_ZONE" ]; then
+    uci -q set "firewall.${WAN_ZONE}.fullcone4=1"
+    uci -q set "firewall.${WAN_ZONE}.fullcone6=0"
+fi
+
+# Factory state must not hijack LAN DNS before OpenClash is configured.
+# luci-app-adguardhome owns this rule and will create it when redirect is enabled.
+uci -q delete firewall.adguardhome_redirect
+
+uci -q commit firewall
+
+# -----------------------------------------------------------------------------
+# 4. OpenClash
+# -----------------------------------------------------------------------------
+if [ -f /etc/config/openclash ]; then
+    log "configuring generic OpenClash defaults"
+
+    uci -q set openclash.config='openclash'
+
+    # Safe factory state: user imports a subscription/config first.
+    uci -q set openclash.config.enable='0'
+
+    # DNS architecture
+    uci -q set openclash.config.dns_port='7874'
+    uci -q set openclash.config.enable_redirect_dns='0'
+    uci -q set openclash.config.enable_custom_dns='1'
+    uci -q set openclash.config.append_wan_dns='1'
+    uci -q set openclash.config.append_default_dns='0'
+    uci -q set openclash.config.en_mode='fake-ip'
+    uci -q set openclash.config.operation_mode='fake-ip'
+    uci -q set openclash.config.store_fakeip='1'
+    uci -q set openclash.config.custom_fakeip_filter='1'
+    uci -q set openclash.config.custom_fakeip_filter_mode='blacklist'
+    uci -q set openclash.config.fakeip_range='198.18.0.1/16'
+
+    # IPv6
+    uci -q set openclash.config.ipv6_enable='1'
+    uci -q set openclash.config.ipv6_dns='1'
+    uci -q set openclash.config.ipv6_mode='0'
+    uci -q set openclash.config.enable_v6_udp_proxy='1'
+    uci -q set openclash.config.fakeip_range6='fdfe:dcba:9876::1/64'
+
+    # Routing / proxy behavior
+    uci -q set openclash.config.proxy_mode='rule'
+    uci -q set openclash.config.intranet_allowed='1'
+    uci -q set openclash.config.enable_udp_proxy='1'
+    uci -q set openclash.config.disable_udp_quic='1'
+    uci -q set openclash.config.router_self_proxy='1'
+    uci -q set openclash.config.skip_proxy_address='1'
+    uci -q set openclash.config.china_ip_route='1'
+    uci -q set openclash.config.china_ip6_route='1'
+
+    # Smart core / performance
+    uci -q set openclash.config.core_type='Smart'
+    uci -q set openclash.config.smart_enable='1'
+    uci -q set openclash.config.auto_smart_switch='1'
+    uci -q set openclash.config.smart_prefer_asn='0'
+    uci -q set openclash.config.smart_enable_lgbm='1'
+    uci -q set openclash.config.smart_collect='0'
+    uci -q set openclash.config.lgbm_auto_update='1'
+    uci -q set openclash.config.lgbm_update_interval='72'
+    uci -q set openclash.config.enable_tcp_concurrent='1'
+    uci -q set openclash.config.enable_unified_delay='1'
+
+    # Sniffer
+    uci -q set openclash.config.enable_meta_sniffer='1'
+    uci -q set openclash.config.enable_meta_sniffer_pure_ip='1'
+    uci -q set openclash.config.enable_meta_sniffer_custom='1'
+
+    # GEO databases / routes: keep upstream URLs managed by OpenClash,
+    # only preserve the tested auto-update policy.
+    uci -q set openclash.config.geo_auto_update='1'
+    uci -q set "openclash.config.geo_update_week_time=*"
+    uci -q set openclash.config.geo_update_day_time='3'
+
+    uci -q set openclash.config.geoip_auto_update='1'
+    uci -q set "openclash.config.geoip_update_week_time=*"
+    uci -q set openclash.config.geoip_update_day_time='3'
+
+    uci -q set openclash.config.geosite_auto_update='1'
+    uci -q set "openclash.config.geosite_update_week_time=*"
+    uci -q set openclash.config.geosite_update_day_time='3'
+
+    uci -q set openclash.config.geoasn_auto_update='1'
+    uci -q set "openclash.config.geoasn_update_week_time=*"
+    uci -q set openclash.config.geoasn_update_day_time='3'
+
+    uci -q set openclash.config.chnr_auto_update='1'
+    uci -q set "openclash.config.chnr_update_week_time=*"
+    uci -q set openclash.config.chnr_update_day_time='3'
+
+    # No personal/custom rule set is shipped in the generic firmware.
+    uci -q set openclash.config.enable_custom_clash_rules='0'
+
+    # Current OpenClash ships several built-in DNS servers enabled by default.
+    # Disable all of them so PPPoE/WAN DNS is the generic source of nameservers.
+    for OC_DNS in $(sections_by_type openclash dns_servers); do
+        uci -q set "openclash.${OC_DNS}.enabled=0"
+    done
+
+    # Remove any transient/runtime DNS state if a future base config contains it.
+    uci -q delete openclash.config.dnsmasq_noresolv
+    uci -q delete openclash.config.default_resolvfile
+
+    # Never ship personal dashboard/authentication secrets.
+    uci -q delete openclash.config.dashboard_password
+
+    uci -q commit openclash
+fi
+
+# -----------------------------------------------------------------------------
+# 5. AdGuard Home LuCI integration
+# -----------------------------------------------------------------------------
+if [ -f /etc/config/AdGuardHome ]; then
+    log "configuring AdGuard Home LuCI defaults"
+
+    uci -q set AdGuardHome.AdGuardHome='AdGuardHome'
+    uci -q set AdGuardHome.AdGuardHome.enabled='1'
+    uci -q set AdGuardHome.AdGuardHome.httpport='3008'
+
+    # Safe factory state. After PPPoE + OpenClash are ready, the user changes
+    # this to "redirect" in LuCI to switch LAN :53 to AGH :1745.
+    uci -q set AdGuardHome.AdGuardHome.redirect='none'
+
+    uci -q set AdGuardHome.AdGuardHome.configpath='/etc/AdGuardHome.yaml'
+    uci -q set AdGuardHome.AdGuardHome.workdir='/usr/bin/AdGuardHome'
+    uci -q set AdGuardHome.AdGuardHome.logfile='/tmp/AdGuardHome.log'
+    uci -q set AdGuardHome.AdGuardHome.verbose='0'
+    uci -q set AdGuardHome.AdGuardHome.binpath='/usr/bin/AdGuardHome/AdGuardHome'
+    uci -q set AdGuardHome.AdGuardHome.waitonboot='1'
+
+    # Prevent stale UCI state from overriding the generic YAML credentials
+    # or triggering an old redirect mode.
+    uci -q delete AdGuardHome.AdGuardHome.username
+    uci -q delete AdGuardHome.AdGuardHome.hashpass
+    uci -q delete AdGuardHome.AdGuardHome.old_redirect
+    uci -q delete AdGuardHome.AdGuardHome.old_port
+    uci -q delete AdGuardHome.AdGuardHome.old_enabled
+    uci -q delete AdGuardHome.AdGuardHome.hostsmd5
+    uci -q delete AdGuardHome.AdGuardHome.gfwupstream
+
+    uci -q commit AdGuardHome
+
+    # Ensure the wait-for-network/download-core boot path is available.
+    [ -x /etc/init.d/AdGuardHome ] && \
+        /etc/init.d/AdGuardHome enable >/dev/null 2>&1
+fi
+
+log "generic SEED AC2 defaults applied successfully"
+exit 0
