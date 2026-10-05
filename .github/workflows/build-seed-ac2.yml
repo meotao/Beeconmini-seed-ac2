@@ -7,7 +7,6 @@
 #=====================================================================
 
 name: Build BeeconMini SEED AC2
-
 on:
   workflow_dispatch:
     inputs:
@@ -177,6 +176,7 @@ jobs:
           echo ">>> 移除 ImmortalWrt 自带的 fullconenat-nft"
           rm -rf ./package/network/utils/fullconenat-nft
         }
+
         [ -d "./package/network/utils/fullconenat" ] && {
           echo ">>> 移除 fullconenat (iptables 版本)"
           rm -rf ./package/network/utils/fullconenat
@@ -194,6 +194,7 @@ jobs:
 
         # 修复: open-app-filter 在非标准父目录下，需要 symlink
         ln -sf OpenAppFilter/open-app-filter package/open-app-filter
+
         echo "✓ OpenAppFilter + symlink"
 
     # ================================================================
@@ -215,9 +216,11 @@ jobs:
         # 删除 nas-packages-luci 在边栏注入的 NAS 顶级菜单
         find package/luci-app-quickstart \( -name "*.lua" -o -name "*.json" \) 2>/dev/null | \
           xargs -r sed -i '/entry.*nas/Id;/"nas"[[:space:]]*:/Id' 2>/dev/null || true
+
         find package/luci-app-quickstart -name "*.lua" 2>/dev/null | \
           xargs -r grep -l 'entry.*nas\|NAS' | \
           xargs -r grep -L 'quickstart' | xargs -r rm -f
+
         echo "✓ QuickStart integrated, NAS menu removed"
 
     # ================================================================
@@ -237,6 +240,41 @@ jobs:
           package/luci-app-argon-config
 
         echo "✓ Argon theme + config plugin"
+
+    # ================================================================
+    # Step 5f: 整合 AdGuard Home LuCI
+    # 来源: https://github.com/stevenjoezhang/luci-app-adguardhome
+    # ================================================================
+    - name: 整合 AdGuard Home LuCI
+      working-directory: ${{ env.WORKSPACE }}/openwrt
+      run: |
+        echo "============================================"
+        echo "  整合 luci-app-adguardhome"
+        echo "============================================"
+
+        rm -rf package/luci-app-adguardhome
+
+        git clone --depth=1 --branch dev \
+          https://github.com/stevenjoezhang/luci-app-adguardhome.git \
+          package/luci-app-adguardhome
+
+        # 验证包结构，避免上游仓库异常时继续编译
+        test -f package/luci-app-adguardhome/Makefile || {
+          echo "ERROR: luci-app-adguardhome Makefile 不存在"
+          exit 1
+        }
+
+        grep -q '^PKG_NAME:=luci-app-adguardhome$' \
+          package/luci-app-adguardhome/Makefile || {
+            echo "ERROR: luci-app-adguardhome Makefile 包名异常"
+            exit 1
+          }
+
+        echo "=== luci-app-adguardhome 信息 ==="
+        grep -E '^PKG_(NAME|VERSION):=' \
+          package/luci-app-adguardhome/Makefile || true
+
+        echo "✓ luci-app-adguardhome integrated"
 
     # ================================================================
     # Step 6: 更新 & 安装 feeds
@@ -276,19 +314,24 @@ jobs:
         LIBXCRYPT_MK="feeds/packages/libs/libxcrypt/Makefile"
         if [ -f "$LIBXCRYPT_MK" ]; then
           echo "  patch 前: $(grep '^PKG_VERSION' "$LIBXCRYPT_MK" || true)"
+
           sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=4.4.36/' "$LIBXCRYPT_MK"
           sed -i 's/^PKG_HASH:=.*/PKG_HASH:=e5e1f4caee0a01de2aee26e3138807d6d3ca2b8e67287966d1fefd65e1fd8943/' "$LIBXCRYPT_MK"
+
           # PKG_FORTIFY_SOURCE:=0 防止 -Werror=format-nonliteral
           if ! grep -q "^PKG_FORTIFY_SOURCE" "$LIBXCRYPT_MK"; then
             sed -i '/^include.*package\.mk/i PKG_FORTIFY_SOURCE:=0' "$LIBXCRYPT_MK"
           fi
+
           # 验证
           PATCHED_VER=$(grep "^PKG_VERSION" "$LIBXCRYPT_MK" \
             | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
           if [ "$PATCHED_VER" != "4.4.36" ]; then
             echo "ERROR: libxcrypt 升级失败（当前: $PATCHED_VER）"
             exit 1
           fi
+
           echo "  patch 后: $PATCHED_VER ✓"
         fi
 
@@ -297,12 +340,14 @@ jobs:
         git clone --depth=1 \
           https://github.com/sbwml/packages_lang_golang \
           feeds/packages/lang/golang
+
         echo "✓ golang replaced with sbwml version"
 
         echo "=== Patch E: ttyd 菜单 system → services ==="
         for TTYD_DIR in feeds/luci/applications/luci-app-ttyd package/feeds/luci/luci-app-ttyd; do
           [ -d "$TTYD_DIR" ] && python3 $GITHUB_WORKSPACE/configs/patch-ttyd-menu.py "$TTYD_DIR"
         done
+
         echo "✓ ttyd menu → services"
 
     # ================================================================
@@ -313,6 +358,7 @@ jobs:
       run: |
         sed -i 's/192.168.1.1/192.168.88.1/g' \
           package/base-files/files/bin/config_generate
+
         grep "192.168.88.1" package/base-files/files/bin/config_generate \
           && echo "✓ LAN IP → 192.168.88.1"
 
@@ -324,13 +370,16 @@ jobs:
       run: |
         # 写入 uci-defaults 脚本，固件首次启动时自动执行
         mkdir -p package/base-files/files/etc/uci-defaults
+
         cat > package/base-files/files/etc/uci-defaults/90-default-theme << 'EOF'
         #!/bin/sh
         uci set luci.main.mediaurlbase='/luci-static/argon'
         uci commit luci
         exit 0
         EOF
+
         chmod +x package/base-files/files/etc/uci-defaults/90-default-theme
+
         echo "✓ Default theme → argon"
 
         # 修复 LuCI 上传 ipk 时 "XHR request aborted by browser" 错误
@@ -345,7 +394,9 @@ jobs:
         /etc/init.d/uhttpd restart
         exit 0
         UHEOF
+
         chmod +x package/base-files/files/etc/uci-defaults/91-uhttpd-upload-fix
+
         echo "✓ uhttpd upload fix"
 
     # ================================================================
@@ -357,6 +408,7 @@ jobs:
         # 已从 downloads.immortalwrt.org 确认:
         # kmods/6.6.86-1-f2c63d42896f12da2b55f2c2b626e7be/
         VERMAGIC="f2c63d42896f12da2b55f2c2b626e7be"
+
         echo "$VERMAGIC" > vermagic
         echo "=== vermagic: $VERMAGIC ==="
 
@@ -394,8 +446,21 @@ jobs:
 
         make defconfig
 
+        echo "=== 诊断: AdGuard Home ==="
+
+        grep -q '^CONFIG_PACKAGE_luci-app-adguardhome=y$' .config || {
+          echo "ERROR: luci-app-adguardhome 未进入最终 .config"
+          exit 1
+        }
+
+        grep -q '^CONFIG_PACKAGE_luci-i18n-adguardhome-zh-cn=y$' .config || \
+          echo "WARNING: luci-app-adguardhome 中文语言包未启用"
+
+        echo "✓ luci-app-adguardhome 已进入最终配置"
+
         echo "=== 诊断: turboacc 相关 ==="
         grep -iE "turboacc|fullcone|offload|bbr|shortcut|sfe" .config || echo "(none)"
+
         echo "=== 诊断: dnsmasq ==="
         grep -i "dnsmasq" .config | head -4 || echo "(none)"
 
@@ -413,6 +478,7 @@ jobs:
       working-directory: ${{ env.WORKSPACE }}/openwrt
       run: |
         make download -j16
+
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
@@ -426,6 +492,7 @@ jobs:
         echo "  开始编译 | CPU: $(nproc) cores"
         echo "  $(date +'%Y-%m-%d %H:%M:%S')"
         echo "============================================"
+
         make -j$(nproc) || make -j1 V=s 2>&1 | tee build.log | tail -100
 
     # ================================================================
@@ -436,12 +503,16 @@ jobs:
       working-directory: ${{ env.WORKSPACE }}/openwrt
       run: |
         mkdir -p $GITHUB_WORKSPACE/firmware
+
         cp -f bin/targets/mediatek/filogic/*seed-ac2* \
               $GITHUB_WORKSPACE/firmware/ 2>/dev/null || true
+
         cp -f bin/targets/mediatek/filogic/sha256sums \
               $GITHUB_WORKSPACE/firmware/ 2>/dev/null || true
+
         cp -f bin/targets/mediatek/filogic/config.buildinfo \
               $GITHUB_WORKSPACE/firmware/ 2>/dev/null || true
+
         echo "=== 编译产物 ==="
         ls -lh $GITHUB_WORKSPACE/firmware/
 
@@ -476,7 +547,6 @@ jobs:
         name: "SEED AC2 (${{ steps.tag.outputs.release_date }})"
         body: |
           ## ImmortalWrt + TurboACC 固件 (BeeconMini SEED AC2)
-
           - **源码**: BeeconMini/immortalwrt (Commit: ${{ env.REPO_COMMIT }})
           - **版本**: ImmortalWrt 24.10.1 | 内核 6.6
           - **设备**: BeeconMini SEED AC2 (MT7981B, 无 Wi-Fi, 9口 2.5G PoE)
