@@ -44,7 +44,7 @@ try:
                     proc.stdin.write(b'\n');proc.stdin.flush();time.sleep(2)
                     command=b"[ -d /sys/class/net/eth0 ] && [ -d /sys/class/net/eth1 ] && echo VM_NICS_OK; ubus call network.interface.wan status; ip -4 addr show dev eth1; ip route; echo VM_SERIAL_DONE\n"
                     proc.stdin.write(command);proc.stdin.flush();sent=True;last_sent=time.monotonic()
-                if sent and 'VM_SERIAL_DONE' in serial and 'VM_NICS_OK\r\n' in serial and 'inet 10.0.2.' in serial:
+                if sent and 'VM_SERIAL_DONE' in serial and '\nVM_NICS_OK\n' in serial and 'inet 10.0.2.' in serial:
                     try:
                         with opener.open('http://127.0.0.1:18080/cgi-bin/luci/',timeout=5) as response:
                             body=response.read().decode(errors='replace')
