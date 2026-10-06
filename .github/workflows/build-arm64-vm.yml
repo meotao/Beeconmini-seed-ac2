@@ -20,13 +20,12 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: arm64-vm-${{ github.ref }}-${{ inputs.profile || 'baseline' }}
+  group: arm64-vm-${{ github.ref }}-${{ inputs.profile || 'all' }}
   cancel-in-progress: false
 env:
   REPO_URL: https://github.com/BeeconMini/immortalwrt
   REPO_COMMIT: 9d076a14becd3ba8301f9290ca69abd4049776d7
   BUILD_ROOT: /workdir/openwrt
-  VM_PROFILE: ${{ inputs.profile || 'baseline' }}
   ENABLE_SFE: ${{ inputs.enable_sfe || 'false' }}
   TZ: Asia/Shanghai
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -34,6 +33,12 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(inputs.profile && format('["{0}"]', inputs.profile) || '["baseline","full"]') }}
+    env:
+      VM_PROFILE: ${{ matrix.profile }}
     defaults:
       run:
         shell: bash
