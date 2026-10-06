@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Boot the actual EFI disk and verify LuCI, two NICs and WAN DHCP over serial."""
 from pathlib import Path
-import argparse,gzip,json,os,shutil,subprocess,time,urllib.request
+import argparse,json,os,runpy,shutil,subprocess,time,urllib.request
 p=argparse.ArgumentParser()
 p.add_argument('directory',type=Path)
 p.add_argument('--accel',choices=['tcg','hvf'],default='tcg')
@@ -19,7 +19,8 @@ if not efi:
     efi=next((f for f in choices if Path(f).is_file()),None)
 if not efi: raise SystemExit('EFI firmware missing; set VM_EFI')
 disk=a.directory/'smoke-working.img'
-with gzip.open(images[0],'rb') as src,disk.open('wb') as dst: shutil.copyfileobj(src,dst)
+unpack=runpy.run_path(str(Path(__file__).with_name('unpack-vm-image.py')))['unpack']
+unpack(images[0],disk)
 log=a.directory/'serial.log'
 cmd=['qemu-system-aarch64','-machine','virt','-accel',a.accel,'-cpu','host' if a.accel=='hvf' else 'cortex-a53',
      '-smp','2','-m','1024','-bios',efi,'-display','none','-monitor','none','-serial','stdio',
