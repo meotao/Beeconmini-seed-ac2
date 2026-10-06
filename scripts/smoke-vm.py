@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Boot the actual EFI disk and verify LuCI, two NICs and WAN DHCP over serial."""
 from pathlib import Path
-import argparse,json,os,runpy,shutil,subprocess,time,urllib.request
+import argparse,json,os,runpy,shutil,subprocess,time,urllib.error,urllib.request
 p=argparse.ArgumentParser()
 p.add_argument('directory',type=Path)
 p.add_argument('--accel',choices=['tcg','hvf'],default='tcg')
@@ -47,9 +47,15 @@ try:
                     proc.stdin.write(command);proc.stdin.flush();sent=True;last_sent=time.monotonic()
                 if sent and 'VM_SERIAL_DONE' in serial and '\nVM_NICS_OK\n' in serial and 'inet 10.0.2.' in serial:
                     try:
-                        with opener.open('http://127.0.0.1:18080/cgi-bin/luci/',timeout=5) as response:
+                        try:
+                            response=opener.open('http://127.0.0.1:18080/cgi-bin/luci/',timeout=5)
+                        except urllib.error.HTTPError as error:
+                            if error.code!=403: raise
+                            response=error
+                        with response:
                             body=response.read().decode(errors='replace')
-                            if response.status==200 and ('LuCI' in body or 'luci' in body or 'ImmortalWrt' in body):
+                            login_required=response.status==403 and response.headers.get('x-luci-login-required')=='yes'
+                            if (response.status==200 or login_required) and ('LuCI' in body or 'luci' in body or 'ImmortalWrt' in body):
                                 result.update(passed=True,luci_http=response.status,two_nics=True,wan_dhcp=True)
                                 break
                     except (OSError,urllib.error.URLError): pass
