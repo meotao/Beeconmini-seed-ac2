@@ -124,15 +124,23 @@ jobs:
         # 确保非交互式运行（预删除旧目录）
         rm -rf ./package/turboacc
 
-        # 下载并执行官方脚本
-        curl -sSL https://raw.githubusercontent.com/chenmozhijin/turboacc/luci/add_turboacc.sh \
+        # 固定 2026-04-01 构建时的 TurboACC 脚本、LuCI 和 package 来源
+        TURBOACC_LUCI_COMMIT=2846e3eb85258ac9783d34ee6dda3e8e0644555c
+        TURBOACC_PACKAGE_COMMIT=a82479aaebb34c90134d66be2200a9dd50f469fb
+        TURBOACC_PACKAGE_DIR=$(mktemp -d)
+        curl -fSL "https://github.com/chenmozhijin/turboacc/archive/${TURBOACC_PACKAGE_COMMIT}.tar.gz" | tar -xz --strip-components=1 -C "$TURBOACC_PACKAGE_DIR"
+
+        # 下载并执行固定版本的官方脚本
+        curl -fSL "https://raw.githubusercontent.com/chenmozhijin/turboacc/${TURBOACC_LUCI_COMMIT}/add_turboacc.sh" \
           -o add_turboacc.sh
+        # 脚本内部 LuCI clone 也必须固定，避免默认分支漂移
+        sed -i '/^git clone /a git -C "$TMPDIR/turboacc/turboacc" fetch --depth=1 origin 2846e3eb85258ac9783d34ee6dda3e8e0644555c || exit 1\ngit -C "$TMPDIR/turboacc/turboacc" checkout --detach 2846e3eb85258ac9783d34ee6dda3e8e0644555c || exit 1' add_turboacc.sh
         chmod +x add_turboacc.sh
 
         if [ "${ENABLE_SFE}" = "true" ]; then
-          bash add_turboacc.sh
+          bash add_turboacc.sh --local-pkg "$TURBOACC_PACKAGE_DIR"
         else
-          bash add_turboacc.sh --no-sfe
+          bash add_turboacc.sh --no-sfe --local-pkg "$TURBOACC_PACKAGE_DIR"
         fi
 
         # ---- 关键修复: add_turboacc.sh 写入的是 "is not set" ----
@@ -493,7 +501,17 @@ jobs:
         echo "  $(date +'%Y-%m-%d %H:%M:%S')"
         echo "============================================"
 
-        make -j$(nproc) || make -j1 V=s 2>&1 | tee build.log | tail -100
+        if ! make -j$(nproc); then
+          set +e
+          make -j1 V=s > build.log 2>&1
+          build_status=$?
+          set -e
+          tail -100 build.log
+          find build_dir -type f -name '*.rej' -print -exec cat {} \;
+          if [ "$build_status" -ne 0 ]; then
+            exit "$build_status"
+          fi
+        fi
 
     # ================================================================
     # Step 12: 整理固件
@@ -502,6 +520,11 @@ jobs:
       if: success()
       working-directory: ${{ env.WORKSPACE }}/openwrt
       run: |
+        firmware_image=$(find bin/targets/mediatek/filogic -maxdepth 1 -type f -name '*seed-ac2*' \( -name '*.bin' -o -name '*.img' -o -name '*.img.gz' -o -name '*.itb' \) -size +0c -print -quit)
+        if [ -z "$firmware_image" ]; then
+          echo "ERROR: 未找到 SEED AC2 固件镜像"
+          exit 1
+        fi
         mkdir -p $GITHUB_WORKSPACE/firmware
 
         cp -f bin/targets/mediatek/filogic/*seed-ac2* \
@@ -525,6 +548,7 @@ jobs:
       with:
         name: ImmortalWrt-TurboACC-SEED-AC2-${{ github.run_number }}
         path: firmware/
+        if-no-files-found: error
         retention-days: 30
 
     # ================================================================
