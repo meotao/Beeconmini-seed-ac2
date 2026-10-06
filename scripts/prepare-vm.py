@@ -16,7 +16,12 @@ if profile=='full':
     for name in names:
         print(f'>>> VM package integration: {name}',flush=True)
         # Uses only these application steps: never the AC2 config, kernel ABI override or packaging.
-        run(steps[name]['run'])
+        command=steps[name]['run']
+        if name=='整合 QuickStart':
+            # An optional NAS-menu search with no matches is not a build error.
+            command=command.replace("xargs -r grep -L 'quickstart' | xargs -r rm -f",
+                                    "xargs -r grep -L 'quickstart' | xargs -r rm -f || true")
+        run(command)
 else:
     run('./scripts/feeds update -a\n./scripts/feeds install -a')
 config=(repo/'configs/armsr-armv8.config').read_text()
