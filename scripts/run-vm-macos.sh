@@ -12,7 +12,7 @@ IMAGE="$DIR/$(basename "$IMAGE")"
 DISK="$DIR/vm-working.img"
 if [[ ! -e "$DISK" ]]; then
   case "$IMAGE" in
-    *.img.gz) gzip -dc "$IMAGE" > "$DISK.tmp" ;;
+    *.img.gz) python3 "$(dirname "$0")/unpack-vm-image.py" "$IMAGE" "$DISK.tmp" ;;
     *.img) cp "$IMAGE" "$DISK.tmp" ;;
     *) echo 'Use the ext4 combined EFI .img.gz or .img image.'; exit 1 ;;
   esac
