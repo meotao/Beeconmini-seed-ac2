@@ -89,7 +89,7 @@ jobs:
           python3 "$GITHUB_WORKSPACE/scripts/collect-vm-images.py" bin/targets/armsr/armv8 "$GITHUB_WORKSPACE/firmware"
           cp .config "$GITHUB_WORKSPACE/firmware/final.config"
           cp source.commit feeds.buildinfo.vm "$GITHUB_WORKSPACE/firmware/"
-          cp "$GITHUB_WORKSPACE/scripts/run-vm-macos.sh" "$GITHUB_WORKSPACE/firmware/"
+          cp "$GITHUB_WORKSPACE/scripts/run-vm-macos.sh" "$GITHUB_WORKSPACE/scripts/unpack-vm-image.py" "$GITHUB_WORKSPACE/firmware/"
           cp "$GITHUB_WORKSPACE/docs/VM-M4.md" "$GITHUB_WORKSPACE/firmware/"
           (cd "$GITHUB_WORKSPACE/firmware" && sha256sum ./* > SHA256SUMS)
       - name: QEMU EFI 双网卡启动验证
