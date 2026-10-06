@@ -13,7 +13,7 @@ AC2 的 sysupgrade.bin 不能作为虚拟机磁盘；不要将 VM 镜像刷入 A
 - profile=full：迁移 AC2 的通用应用及 TurboACC/OAF 补丁。
 - enable_sfe=false：默认关闭 SFE；仅 full 模式可选 true。
 
-独立分支 codex/armsr-vm 上的推送自动运行 baseline。
+独立分支 codex/armsr-vm 上的推送同时运行 baseline 与 full；手动运行只构建所选 profile。
 基础构建成功后再运行 full。full 外部应用源仍随分支更新，需检查最终配置。
 工作流使用 Ubuntu 22.04，从源码编译；一次运行最长 6 小时。
 
@@ -40,6 +40,7 @@ CI 使用 x86 Linux 主机上的 QEMU TCG；M4 HVF 需本机另行验证。
 
 ~~~sh
 brew install qemu
+# 同目录保留 unpack-vm-image.py；启动脚本需要 python3。
 bash run-vm-macos.sh ./immortalwrt-armsr-armv8-generic-ext4-combined-efi.img.gz
 ~~~
 
