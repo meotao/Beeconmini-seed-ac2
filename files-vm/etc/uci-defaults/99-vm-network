@@ -1,0 +1,18 @@
+#!/bin/sh
+# VM-only defaults. QEMU NIC order: eth0 LAN, eth1 WAN.
+cat > /etc/config/network <<'NET'
+config interface 'loopback'
+        option device 'lo'
+        option proto 'static'
+        option ipaddr '127.0.0.1'
+        option netmask '255.0.0.0'
+config interface 'lan'
+        option device 'eth0'
+        option proto 'static'
+        option ipaddr '192.168.88.1'
+        option netmask '255.255.255.0'
+config interface 'wan'
+        option device 'eth1'
+        option proto 'dhcp'
+NET
+exit 0
