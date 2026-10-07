@@ -97,6 +97,13 @@ jobs:
           cp "$GITHUB_WORKSPACE/scripts/run-vm-macos.sh" "$GITHUB_WORKSPACE/scripts/unpack-vm-image.py" "$GITHUB_WORKSPACE/firmware/"
           cp "$GITHUB_WORKSPACE/docs/VM-M4.md" "$GITHUB_WORKSPACE/firmware/"
           (cd "$GITHUB_WORKSPACE/firmware" && sha256sum ./* > SHA256SUMS)
+      - name: 保留尚未验证的候选镜像
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: ARM64-VM-candidate-unverified-${{ env.VM_PROFILE }}-${{ github.run_number }}
+          path: firmware/
+          if-no-files-found: error
+          retention-days: 7
       - name: QEMU EFI 双网卡启动验证
         timeout-minutes: 20
         run: python3 scripts/smoke-vm.py firmware --accel tcg --timeout 900
@@ -111,10 +118,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: ARM64-VM-diagnostics-${{ github.run_number }}
+          name: ARM64-VM-diagnostics-${{ env.VM_PROFILE }}-${{ github.run_number }}
           path: |
             /workdir/openwrt/build.log
-            /workdir/openwrt/.config
+            firmware/final.config
             firmware/serial.log
             firmware/smoke-result.json
           if-no-files-found: warn
