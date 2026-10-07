@@ -24,6 +24,21 @@ if profile=='full':
         run(command)
 else:
     run('./scripts/feeds update -a\n./scripts/feeds install -a')
+# Keep one reader on the VM UART; TARGET_SERIAL also expands to ttyAMA0.
+inittab=build/'target/linux/armsr/base-files/etc/inittab'
+text=inittab.read_text()
+placeholder='@GRUB_SERIAL@::askfirst:/usr/libexec/login.sh\n'
+if text.count(placeholder)!=1:
+    raise RuntimeError('Unexpected armsr inittab; refusing an unverified console edit')
+inittab.write_text(text.replace(placeholder,''))
+if profile=='full':
+    patch=build/'target/linux/generic/hack-6.6/952-add-net-conntrack-events-support-multiple-registrant.patch'
+    old='@@ -3118,8 +3126,9 @@ errout:\n \tnfnetlink_set_err(net, 0, 0, -ENOBUFS);\n \treturn 0;\n }\n #endif\n+#endif\n \n static unsigned long ctnetlink_exp_id(const struct nf_conntrack_expect *exp)\n {\n \tunsigned long id = (unsigned long)exp;\n'
+    new='@@ -3139,5 +3147,6 @@ errout:\n \treturn 0;\n }\n #endif\n+#endif\n static int ctnetlink_exp_done(struct netlink_callback *cb)\n {\n'
+    text=patch.read_text()
+    if text.count(old)!=1:
+        raise RuntimeError('TurboACC patch changed; review kernel 6.6.86 compatibility')
+    patch.write_text(text.replace(old,new))
 config=(repo/'configs/armsr-armv8.config').read_text()
 if profile=='full': config+=(repo/'configs/vm-apps.config').read_text()
 if profile=='full' and sfe=='true':
