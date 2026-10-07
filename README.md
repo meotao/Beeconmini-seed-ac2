@@ -32,7 +32,7 @@
 ## 配置结构
 
 ```
-.github/workflows/build-seed-ac2.yml  ← 唯一 workflow
+.github/workflows/build-seed-ac2.yml  ← AC2 实机 workflow
 configs/mt7981-common.config           ← MT7981 平台通用配置
 configs/seed-ac2.config                ← SEED AC2 设备差异配置
 ```
@@ -89,3 +89,9 @@ OpenClash 通过 Kconfig `select` 拉入 `shadowsocks-rust`，用户配置文件
 - [destan19/OpenAppFilter](https://github.com/destan19/OpenAppFilter)
 - [lq-wq/luci-app-quickstart](https://github.com/lq-wq/luci-app-quickstart)
 - [sbwml/packages_lang_golang](https://github.com/sbwml/packages_lang_golang)
+
+## Mac mini M4 / ARM64 虚拟机
+
+新增独立 `Build ARM64 VM` 工作流，使用既有 `armsr/armv8/generic` EFI target。
+提供基础启动验证版与通用应用迁移版；AC2 固件不能直接作为 VM 磁盘。
+详细步骤见 [VM-M4 操作流程](docs/VM-M4.md)。
