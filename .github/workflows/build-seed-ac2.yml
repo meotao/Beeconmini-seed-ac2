@@ -65,6 +65,61 @@ jobs:
       uses: actions/checkout@v4.2.2
 
     # ================================================================
+    # Step 2b: 测速并选择最快的 Ubuntu 软件源
+    # ================================================================
+    - name: 测速选择 Ubuntu 镜像源
+      timeout-minutes: 3
+      run: |
+        set -euo pipefail
+        TEST_PATH="dists/jammy/main/binary-amd64/Packages.gz"
+        MIRRORS=(
+          "http://azure.archive.ubuntu.com/ubuntu"
+          "http://archive.ubuntu.com/ubuntu"
+          "https://mirrors.edge.kernel.org/ubuntu"
+          "https://mirror.math.princeton.edu/pub/ubuntu"
+        )
+        BEST_MIRROR=""
+        BEST_SPEED=0
+
+        for mirror in "${MIRRORS[@]}"; do
+          result="$(curl -sSL --range 0-1048575 --max-time 12 \
+            --max-filesize 1048576 -o /dev/null \
+            -w '%{http_code} %{size_download} %{speed_download}' \
+            "$mirror/$TEST_PATH" 2>/dev/null || true)"
+          read -r status bytes speed <<< "$result"
+          speed="${speed%.*}"
+          [[ "$speed" =~ ^[0-9]+$ ]] || speed=0
+
+          if [[ "${status:-}" =~ ^2[0-9][0-9]$ ]] && \
+             [[ "${bytes:-}" =~ ^[0-9]+$ ]] && (( bytes > 0 )); then
+            echo "镜像测速: $mirror, ${bytes} bytes, ${speed} bytes/s"
+            if (( speed > BEST_SPEED )); then
+              BEST_SPEED=$speed
+              BEST_MIRROR=$mirror
+            fi
+          else
+            echo "镜像不可用或测速超时: $mirror"
+          fi
+        done
+
+        if [[ -z "$BEST_MIRROR" ]]; then
+          echo "未测到可用镜像，保留 runner 默认 Ubuntu 源"
+          exit 0
+        fi
+
+        echo "选择最快 Ubuntu 镜像: $BEST_MIRROR (${BEST_SPEED} bytes/s)"
+        while IFS= read -r -d '' source_file; do
+          if sudo grep -qE 'https?://[^[:space:]]*ubuntu\.com/ubuntu' "$source_file"; then
+            sudo sed -i -E \
+              "s#https?://[^[:space:]]*ubuntu\\.com/ubuntu/?#$BEST_MIRROR#g" \
+              "$source_file"
+          fi
+        done < <(find /etc/apt -type f \
+          \( -name '*.list' -o -name '*.sources' \) -print0)
+        grep -R -E '^(URIs:|deb .*ubuntu.com/ubuntu)' \
+          /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true
+
+    # ================================================================
     # Step 3: 初始化编译环境
     # 经验教训:
     #   - 必须包含 bison (内核编译)
