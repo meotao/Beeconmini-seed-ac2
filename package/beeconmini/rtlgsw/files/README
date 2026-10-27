@@ -1,0 +1,4 @@
+The rtlgsw executable and bm-gsw.ko are extracted from BeeconMini SEED AC2
+firmware. The matching kernel module license is GPL-2.0. The vendor firmware
+uses this userspace daemon with kmod-bm-gsw to configure the RTL8373 through
+the /dev/bm-mdio character device.

@@ -79,7 +79,13 @@ OpenClash 通过 Kconfig `select` 拉入 `shadowsocks-rust`，用户配置文件
 
 ### RTL8373 驱动版本问题
 
-`rtl8373.ko` 是预编译二进制 (`vermagic=6.6.73`)，但 immortalwrt 24.10.1 使用 kernel 6.6.86。运行时 `insmod` 可能因版本不匹配而失败。这只能由 BeeconMini 更新 .ko 解决。
+基线源代码中的 `rtl8373.ko` 是预编译二进制 (`vermagic=6.6.73`)，内核版本为 6.6.86。BeeconMini/ImmortalWrt 的 `CONFIG_MODULE_STRIPPED=y` 和 `204-module_strip.patch` 会跳过内核加载时的 vermagic 比较；`CONFIG_MODVERSIONS` 同时关闭，因此模块能加载，但仍没有符号 CRC 对内核 ABI 做逐项校验。SEED AC2 实机稳定运行是 RTL8373 兼容性的直接验证。
+
+### BM GSW 迁移
+
+`port/bm-gsw` 分支增加了从厂商固件提取的 `bm-gsw.ko`、`rtlgsw` 守护进程和内核启动回退逻辑。`bm_gsw` 提供 `/dev/bm-mdio`，需要 `rtlgsw` 初始化和管理交换芯片；它不能只靠替换 Kconfig 包名完成迁移。启动脚本优先启动 BM GSW；模块无法加载、未绑定设备树节点或缺少守护进程时，重新加载原有 `rtl8373` 驱动。
+
+该分支仍需在 AC2 硬件验证端口转发、VLAN、WAN 链路和 PoE。`vermagic` 被忽略不等于所有内核 ABI 差异都安全；模块也没有 `__versions` CRC 表。构建流程会检查 `MODULE_STRIPPED` 条件，防止换到会执行严格 vermagic 检查的基线后悄悄生成不可用镜像。
 
 ## 鸣谢
 

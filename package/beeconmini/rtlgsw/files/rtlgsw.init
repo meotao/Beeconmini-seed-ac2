@@ -1,0 +1,57 @@
+#!/bin/sh /etc/rc.common
+
+START=50
+STOP=10
+
+USE_PROCD=1
+PROG=/usr/bin/rtlgsw
+
+fallback_to_rtl8373() {
+	logger -t rtlgsw "$1; falling back to rtl8373"
+	if [ -n "$(lsmod | awk '$1 == "bm_gsw" { print $1 }')" ]; then
+		rmmod bm_gsw || {
+			logger -t rtlgsw "cannot unload bm_gsw; leaving current driver state unchanged"
+			return 1
+		}
+	fi
+	modprobe rtl8373
+}
+
+start_service() {
+	if [ -n "$(lsmod | awk '$1 == "rtl8373" { print $1 }')" ]; then
+		rmmod rtl8373 || return 1
+	fi
+
+	if ! modprobe bm_gsw; then
+		fallback_to_rtl8373 "bm_gsw failed to load" || return 1
+		return 0
+	fi
+
+	# The platform driver's probe creates this device after binding to the DTS node.
+	i=0
+	while [ ! -c /dev/bm-mdio ] && [ "$i" -lt 10 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+
+	if [ ! -c /dev/bm-mdio ] || [ ! -c /dev/i2c-0 ] || [ ! -x "$PROG" ]; then
+		fallback_to_rtl8373 "bm_gsw probe, i2c device, or rtlgsw binary unavailable" || return 1
+		return 0
+	fi
+
+	procd_open_instance
+	procd_set_param command "$PROG" -f
+	procd_set_param respawn 3600 5 5
+	procd_close_instance
+}
+
+stop_service() {
+	if [ -n "$(lsmod | awk '$1 == "bm_gsw" { print $1 }')" ]; then
+		if rmmod bm_gsw; then
+			modprobe rtl8373
+		else
+			logger -t rtlgsw "cannot unload bm_gsw during stop"
+			return 1
+		fi
+	fi
+}
