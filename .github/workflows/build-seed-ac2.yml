@@ -188,6 +188,37 @@ jobs:
           bash add_turboacc.sh --no-sfe
         fi
 
+        # TurboACC's 952 patch carries stale context for Linux 6.6.86:
+        # ctnetlink_exp_done now follows ctnetlink_expect_event directly.
+        # Keep the same guard, but anchor its closing #endif at that function.
+        python3 - "./target/linux/generic/hack-6.6/952-add-net-conntrack-events-support-multiple-registrant.patch" <<'PY'
+        from pathlib import Path
+        import re
+        import sys
+
+        path = Path(sys.argv[1])
+        patch = path.read_text()
+        new_hunk = (
+            "@@ -3140,2 +3148,3 @@\n"
+            " #endif\n"
+            "+#endif\n"
+            " static int ctnetlink_exp_done(struct netlink_callback *cb)\n"
+        )
+        stale_hunk = re.compile(
+            r"@@ -\d+,\d+ \+\d+,\d+ @@ errout:\n"
+            r".*?(?=@@ -\d+,\d+ \+\d+,\d+ @@ static int ctnetlink_stat_exp_cpu)",
+            re.DOTALL,
+        )
+        if stale_hunk.search(patch):
+            patch = stale_hunk.sub(new_hunk, patch, count=1)
+            path.write_text(patch)
+            print("✓ 952 patch context updated for Linux 6.6.86")
+        elif new_hunk in patch:
+            print("✓ 952 patch already has the Linux 6.6.86 context fix")
+        else:
+            raise SystemExit("ERROR: unexpected TurboACC 952 patch layout")
+        PY
+
         # ---- 关键修复: add_turboacc.sh 写入的是 "is not set" ----
         # 必须改为 =y，否则 patch 953 的 #ifdef CONFIG_SHORTCUT_FE 不生效
         CFG="./target/linux/generic/config-6.6"
@@ -591,12 +622,18 @@ jobs:
     - name: 编译固件
       working-directory: ${{ env.WORKSPACE }}/openwrt
       run: |
+        set -o pipefail
         echo "============================================"
         echo "  开始编译 | CPU: $(nproc) cores"
         echo "  $(date +'%Y-%m-%d %H:%M:%S')"
         echo "============================================"
 
-        make -j$(nproc) || make -j1 V=s 2>&1 | tee build.log | tail -100
+        if make -j"$(nproc)"; then
+          echo "✓ 并行编译成功"
+        else
+          echo "并行编译失败，收集串行详细日志后重试"
+          make -j1 V=s 2>&1 | tee build.log | tail -100
+        fi
 
     # ================================================================
     # Step 11b: 验证预编译 bm_gsw.ko 引用的符号都由基线内核导出
