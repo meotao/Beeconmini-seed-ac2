@@ -71,11 +71,15 @@ jobs:
     #   - 必须包含 perl-modules-5.34 (libxcrypt 兼容)
     # ================================================================
     - name: 初始化编译环境
+      timeout-minutes: 25
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install -y \
+        sudo -E apt-get update \
+          -o Acquire::Retries=3 \
+          -o Acquire::http::Timeout=30 \
+          -o Acquire::https::Timeout=30
+        sudo -E apt-get install -y --no-install-recommends \
           ack antlr3 asciidoc autoconf automake autopoint binutils bison \
           build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler \
           ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev \
@@ -88,8 +92,7 @@ jobs:
           qemu-utils re2c rsync scons squashfs-tools subversion \
           swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd \
           perl-modules-5.34
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
+        sudo -E apt-get clean
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p $WORKSPACE
         sudo chown $USER:$GROUPS $WORKSPACE
