@@ -51,6 +51,8 @@ Workflow 通过 `cat` 合并两层配置后执行 `make defconfig`。
 
 4. **ImmortalWrt 自带 fullcone 支持**：ImmortalWrt 有自己的 `fullconenat-nft` 包和 firewall4/nftables/libnftnl 补丁。`add_turboacc.sh` 替换这三个包后，必须移除 `fullconenat-nft` 避免冲突。
 
+5. **TurboACC patch 952 必须固定版本**：工作流使用仓库内的 `patches/turboacc/952-add-net-conntrack-events-support-multiple-registrant.patch`，来源固定为 TurboACC 提交 `2652b9958f2e85093b04ddda04eabadb39174ec5`，SHA256 为 `8b5bd8037fc76906e97fc16aa218d8c2713963f42d5fb9687e177cb03e50f135`。不要从 TurboACC `package` 分支取最新版本：其较新的 hunk 无法应用到基线 Linux 6.6.86。
+
 ### Kconfig 自引用 Bug
 
 `kmod-nft-fullcone` 和 `kmod-oaf` 都有 Kconfig 自引用循环依赖 bug（`PACKAGE_kmod-xxx is selected by PACKAGE_kmod-xxx`），`make defconfig` 会静默跳过这些包。解决方案是在 `.config` 中显式声明 `=y`。

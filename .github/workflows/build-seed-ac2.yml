@@ -188,36 +188,17 @@ jobs:
           bash add_turboacc.sh --no-sfe
         fi
 
-        # TurboACC's 952 patch carries stale context for Linux 6.6.86:
-        # ctnetlink_exp_done now follows ctnetlink_expect_event directly.
-        # Keep the same guard, but anchor its closing #endif at that function.
-        python3 - "./target/linux/generic/hack-6.6/952-add-net-conntrack-events-support-multiple-registrant.patch" <<'PY'
-        from pathlib import Path
-        import re
-        import sys
-
-        path = Path(sys.argv[1])
-        patch = path.read_text()
-        new_hunk = (
-            "@@ -3140,2 +3148,3 @@\n"
-            " #endif\n"
-            "+#endif\n"
-            " static int ctnetlink_exp_done(struct netlink_callback *cb)\n"
-        )
-        stale_hunk = re.compile(
-            r"@@ -\d+,\d+ \+\d+,\d+ @@ errout:\n"
-            r".*?(?=@@ -\d+,\d+ \+\d+,\d+ @@ static int ctnetlink_stat_exp_cpu)",
-            re.DOTALL,
-        )
-        if stale_hunk.search(patch):
-            patch = stale_hunk.sub(new_hunk, patch, count=1)
-            path.write_text(patch)
-            print("✓ 952 patch context updated for Linux 6.6.86")
-        elif new_hunk in patch:
-            print("✓ 952 patch already has the Linux 6.6.86 context fix")
-        else:
-            raise SystemExit("ERROR: unexpected TurboACC 952 patch layout")
-        PY
+        # Pin the 6.6 conntrack patch to the known-compatible TurboACC revision.
+        # Upstream package branch updates this file independently and its latest
+        # hunk no longer applies to the baseline Linux 6.6.86 source.
+        PINNED_952_SHA256="8b5bd8037fc76906e97fc16aa218d8c2713963f42d5fb9687e177cb03e50f135"
+        PINNED_952="target/linux/generic/hack-6.6/952-add-net-conntrack-events-support-multiple-registrant.patch"
+        test "$(sha256sum "$GITHUB_WORKSPACE/patches/turboacc/$(basename "$PINNED_952")" | awk '{print $1}')" = "$PINNED_952_SHA256" || {
+          echo "ERROR: pinned TurboACC 952 patch checksum mismatch"
+          exit 1
+        }
+        install -m 0644 "$GITHUB_WORKSPACE/patches/turboacc/$(basename "$PINNED_952")" "$PINNED_952"
+        echo "✓ Using pinned TurboACC 952 revision 2652b9958f2e85093b04ddda04eabadb39174ec5"
 
         # ---- 关键修复: add_turboacc.sh 写入的是 "is not set" ----
         # 必须改为 =y，否则 patch 953 的 #ifdef CONFIG_SHORTCUT_FE 不生效
